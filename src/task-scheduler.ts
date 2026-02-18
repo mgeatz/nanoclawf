@@ -1,16 +1,14 @@
-import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 import path from 'path';
 
 import {
+  DATA_DIR,
   GROUPS_DIR,
-  IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
-import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './container-runner.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -20,14 +18,41 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
+import { runOpenCodeAgent } from './opencode-client.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
-  onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (chatId: string, text: string) => Promise<void>;
+}
+
+/**
+ * Write filtered tasks to the group's IPC directory for the agent to read via list_tasks.
+ */
+function writeTasksSnapshot(
+  groupFolder: string,
+  isMain: boolean,
+  tasks: Array<{
+    id: string;
+    groupFolder: string;
+    prompt: string;
+    schedule_type: string;
+    schedule_value: string;
+    status: string;
+    next_run: string | null;
+  }>,
+): void {
+  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+
+  const filteredTasks = isMain
+    ? tasks
+    : tasks.filter((t) => t.groupFolder === groupFolder);
+
+  const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
+  fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
 async function runTask(
@@ -64,13 +89,13 @@ async function runTask(
     return;
   }
 
-  // Update tasks snapshot for container to read (filtered by group)
+  // Update tasks snapshot for agent to read
   const isMain = task.group_folder === MAIN_GROUP_FOLDER;
-  const tasks = getAllTasks();
+  const allTasks = getAllTasks();
   writeTasksSnapshot(
     task.group_folder,
     isMain,
-    tasks.map((t) => ({
+    allTasks.map((t) => ({
       id: t.id,
       groupFolder: t.group_folder,
       prompt: t.prompt,
@@ -84,56 +109,25 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the group's current session
   const sessions = deps.getSessions();
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
-  // Idle timer: writes _close sentinel after IDLE_TIMEOUT of no output,
-  // so the container exits instead of hanging at waitForIpcMessage forever.
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const resetIdleTimer = () => {
-    if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      logger.debug({ taskId: task.id }, 'Scheduled task idle timeout, closing container stdin');
-      deps.queue.closeStdin(task.chat_jid);
-    }, IDLE_TIMEOUT);
-  };
-
   try {
-    const output = await runContainerAgent(
-      group,
-      {
-        prompt: task.prompt,
-        sessionId,
-        groupFolder: task.group_folder,
-        chatJid: task.chat_jid,
-        isMain,
-        isScheduledTask: true,
-      },
-      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
-      async (streamedOutput: ContainerOutput) => {
-        if (streamedOutput.result) {
-          result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
-          // Only reset idle timer on actual results, not session-update markers
-          resetIdleTimer();
-        }
-        if (streamedOutput.status === 'error') {
-          error = streamedOutput.error || 'Unknown error';
-        }
-      },
-    );
-
-    if (idleTimer) clearTimeout(idleTimer);
+    const output = await runOpenCodeAgent({
+      groupFolder: task.group_folder,
+      chatId: task.chat_id,
+      isMain,
+      prompt: task.prompt,
+      sessionId,
+    });
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
     } else if (output.result) {
-      // Messages are sent via MCP tool (IPC), result text is just logged
       result = output.result;
+      // Forward result to user
+      await deps.sendMessage(task.chat_id, output.result);
     }
 
     logger.info(
@@ -141,7 +135,6 @@ async function runTask(
       'Task completed',
     );
   } catch (err) {
-    if (idleTimer) clearTimeout(idleTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
@@ -167,7 +160,6 @@ async function runTask(
     const ms = parseInt(task.schedule_value, 10);
     nextRun = new Date(Date.now() + ms).toISOString();
   }
-  // 'once' tasks have no next run
 
   const resultSummary = error
     ? `Error: ${error}`
@@ -195,14 +187,13 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       }
 
       for (const task of dueTasks) {
-        // Re-check task status in case it was paused/cancelled
         const currentTask = getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
           continue;
         }
 
         deps.queue.enqueueTask(
-          currentTask.chat_jid,
+          currentTask.chat_id,
           currentTask.id,
           () => runTask(currentTask, deps),
         );

@@ -9,23 +9,13 @@ import {
   MAIN_GROUP_FOLDER,
   TIMEZONE,
 } from './config.js';
-import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (chatId: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
-  registerGroup: (jid: string, group: RegisteredGroup) => void;
-  syncGroupMetadata: (force: boolean) => Promise<void>;
-  getAvailableGroups: () => AvailableGroup[];
-  writeGroupsSnapshot: (
-    groupFolder: string,
-    isMain: boolean,
-    availableGroups: AvailableGroup[],
-    registeredJids: Set<string>,
-  ) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -41,7 +31,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
   const processIpcFiles = async () => {
-    // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
     try {
       groupFolders = fs.readdirSync(ipcBaseDir).filter((f) => {
@@ -61,7 +50,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
-      // Process messages from this group's IPC directory
+      // Process messages
       try {
         if (fs.existsSync(messagesDir)) {
           const messageFiles = fs
@@ -71,21 +60,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
+              if (data.type === 'message' && data.chatId && data.text) {
+                // Authorization: verify this group can send to this chatId
+                const targetGroup = registeredGroups[data.chatId];
                 if (
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  await deps.sendMessage(data.chatId, data.text);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatId: data.chatId, sourceGroup },
                     'IPC message sent',
                   );
                 } else {
                   logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatId: data.chatId, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
                   );
                 }
@@ -112,7 +101,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
         );
       }
 
-      // Process tasks from this group's IPC directory
+      // Process tasks
       try {
         if (fs.existsSync(tasksDir)) {
           const taskFiles = fs
@@ -122,7 +111,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(tasksDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              // Pass source group identity to processTaskIpc for authorization
               await processTaskIpc(data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {
@@ -160,18 +148,10 @@ export async function processTaskIpc(
     schedule_value?: string;
     context_mode?: string;
     groupFolder?: string;
-    chatJid?: string;
-    targetJid?: string;
-    // For register_group
-    jid?: string;
-    name?: string;
-    folder?: string;
-    trigger?: string;
-    requiresTrigger?: boolean;
-    containerConfig?: RegisteredGroup['containerConfig'];
+    targetChatId?: string;
   },
-  sourceGroup: string, // Verified identity from IPC directory
-  isMain: boolean, // Verified from directory path
+  sourceGroup: string,
+  isMain: boolean,
   deps: IpcDeps,
 ): Promise<void> {
   const registeredGroups = deps.registeredGroups();
@@ -182,15 +162,14 @@ export async function processTaskIpc(
         data.prompt &&
         data.schedule_type &&
         data.schedule_value &&
-        data.targetJid
+        data.targetChatId
       ) {
-        // Resolve the target group from JID
-        const targetJid = data.targetJid as string;
-        const targetGroupEntry = registeredGroups[targetJid];
+        const targetChatId = data.targetChatId;
+        const targetGroupEntry = registeredGroups[targetChatId];
 
         if (!targetGroupEntry) {
           logger.warn(
-            { targetJid },
+            { targetChatId },
             'Cannot schedule task: target group not registered',
           );
           break;
@@ -253,7 +232,7 @@ export async function processTaskIpc(
         createTask({
           id: taskId,
           group_folder: targetFolder,
-          chat_jid: targetJid,
+          chat_id: targetChatId,
           prompt: data.prompt,
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
@@ -320,56 +299,6 @@ export async function processTaskIpc(
             'Unauthorized task cancel attempt',
           );
         }
-      }
-      break;
-
-    case 'refresh_groups':
-      // Only main group can request a refresh
-      if (isMain) {
-        logger.info(
-          { sourceGroup },
-          'Group metadata refresh requested via IPC',
-        );
-        await deps.syncGroupMetadata(true);
-        // Write updated snapshot immediately
-        const availableGroups = deps.getAvailableGroups();
-        deps.writeGroupsSnapshot(
-          sourceGroup,
-          true,
-          availableGroups,
-          new Set(Object.keys(registeredGroups)),
-        );
-      } else {
-        logger.warn(
-          { sourceGroup },
-          'Unauthorized refresh_groups attempt blocked',
-        );
-      }
-      break;
-
-    case 'register_group':
-      // Only main group can register new groups
-      if (!isMain) {
-        logger.warn(
-          { sourceGroup },
-          'Unauthorized register_group attempt blocked',
-        );
-        break;
-      }
-      if (data.jid && data.name && data.folder && data.trigger) {
-        deps.registerGroup(data.jid, {
-          name: data.name,
-          folder: data.folder,
-          trigger: data.trigger,
-          added_at: new Date().toISOString(),
-          containerConfig: data.containerConfig,
-          requiresTrigger: data.requiresTrigger,
-        });
-      } else {
-        logger.warn(
-          { data },
-          'Invalid register_group request - missing required fields',
-        );
       }
       break;
 

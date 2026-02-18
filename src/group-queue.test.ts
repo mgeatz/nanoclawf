@@ -4,23 +4,8 @@ import { GroupQueue } from './group-queue.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
-  DATA_DIR: '/tmp/nanoclaw-test-data',
-  MAX_CONCURRENT_CONTAINERS: 2,
+  MAX_CONCURRENT_AGENTS: 2,
 }));
-
-// Mock fs operations used by sendMessage/closeStdin
-vi.mock('fs', async () => {
-  const actual = await vi.importActual<typeof import('fs')>('fs');
-  return {
-    ...actual,
-    default: {
-      ...actual,
-      mkdirSync: vi.fn(),
-      writeFileSync: vi.fn(),
-      renameSync: vi.fn(),
-    },
-  };
-});
 
 describe('GroupQueue', () => {
   let queue: GroupQueue;
@@ -36,14 +21,13 @@ describe('GroupQueue', () => {
 
   // --- Single group at a time ---
 
-  it('only runs one container per group at a time', async () => {
+  it('only runs one agent per group at a time', async () => {
     let concurrentCount = 0;
     let maxConcurrent = 0;
 
-    const processMessages = vi.fn(async (groupJid: string) => {
+    const processMessages = vi.fn(async (chatId: string) => {
       concurrentCount++;
       maxConcurrent = Math.max(maxConcurrent, concurrentCount);
-      // Simulate async work
       await new Promise((resolve) => setTimeout(resolve, 100));
       concurrentCount--;
       return true;
@@ -51,14 +35,11 @@ describe('GroupQueue', () => {
 
     queue.setProcessMessagesFn(processMessages);
 
-    // Enqueue two messages for the same group
-    queue.enqueueMessageCheck('group1@g.us');
-    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueMessageCheck('email:tag:family');
+    queue.enqueueMessageCheck('email:tag:family');
 
-    // Advance timers to let the first process complete
     await vi.advanceTimersByTimeAsync(200);
 
-    // Second enqueue should have been queued, not concurrent
     expect(maxConcurrent).toBe(1);
   });
 
@@ -69,7 +50,7 @@ describe('GroupQueue', () => {
     let maxActive = 0;
     const completionCallbacks: Array<() => void> = [];
 
-    const processMessages = vi.fn(async (groupJid: string) => {
+    const processMessages = vi.fn(async (chatId: string) => {
       activeCount++;
       maxActive = Math.max(maxActive, activeCount);
       await new Promise<void>((resolve) => completionCallbacks.push(resolve));
@@ -79,19 +60,15 @@ describe('GroupQueue', () => {
 
     queue.setProcessMessagesFn(processMessages);
 
-    // Enqueue 3 groups (limit is 2)
-    queue.enqueueMessageCheck('group1@g.us');
-    queue.enqueueMessageCheck('group2@g.us');
-    queue.enqueueMessageCheck('group3@g.us');
+    queue.enqueueMessageCheck('email:tag:family');
+    queue.enqueueMessageCheck('email:tag:work');
+    queue.enqueueMessageCheck('email:tag:admin');
 
-    // Let promises settle
     await vi.advanceTimersByTimeAsync(10);
 
-    // Only 2 should be active (MAX_CONCURRENT_CONTAINERS = 2)
     expect(maxActive).toBe(2);
     expect(activeCount).toBe(2);
 
-    // Complete one — third should start
     completionCallbacks[0]();
     await vi.advanceTimersByTimeAsync(10);
 
@@ -104,9 +81,8 @@ describe('GroupQueue', () => {
     const executionOrder: string[] = [];
     let resolveFirst: () => void;
 
-    const processMessages = vi.fn(async (groupJid: string) => {
+    const processMessages = vi.fn(async (chatId: string) => {
       if (executionOrder.length === 0) {
-        // First call: block until we release it
         await new Promise<void>((resolve) => {
           resolveFirst = resolve;
         });
@@ -117,25 +93,20 @@ describe('GroupQueue', () => {
 
     queue.setProcessMessagesFn(processMessages);
 
-    // Start processing messages (takes the active slot)
-    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueMessageCheck('email:tag:family');
     await vi.advanceTimersByTimeAsync(10);
 
-    // While active, enqueue both a task and pending messages
     const taskFn = vi.fn(async () => {
       executionOrder.push('task');
     });
-    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
-    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueTask('email:tag:family', 'task-1', taskFn);
+    queue.enqueueMessageCheck('email:tag:family');
 
-    // Release the first processing
     resolveFirst!();
     await vi.advanceTimersByTimeAsync(10);
 
-    // Task should have run before the second message check
-    expect(executionOrder[0]).toBe('messages'); // first call
-    expect(executionOrder[1]).toBe('task'); // task runs first in drain
-    // Messages would run after task completes
+    expect(executionOrder[0]).toBe('messages');
+    expect(executionOrder[1]).toBe('task');
   });
 
   // --- Retry with backoff on failure ---
@@ -145,22 +116,19 @@ describe('GroupQueue', () => {
 
     const processMessages = vi.fn(async () => {
       callCount++;
-      return false; // failure
+      return false;
     });
 
     queue.setProcessMessagesFn(processMessages);
-    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueMessageCheck('email:tag:family');
 
-    // First call happens immediately
     await vi.advanceTimersByTimeAsync(10);
     expect(callCount).toBe(1);
 
-    // First retry after 5000ms (BASE_RETRY_MS * 2^0)
     await vi.advanceTimersByTimeAsync(5000);
     await vi.advanceTimersByTimeAsync(10);
     expect(callCount).toBe(2);
 
-    // Second retry after 10000ms (BASE_RETRY_MS * 2^1)
     await vi.advanceTimersByTimeAsync(10000);
     await vi.advanceTimersByTimeAsync(10);
     expect(callCount).toBe(3);
@@ -174,7 +142,7 @@ describe('GroupQueue', () => {
 
     await queue.shutdown(1000);
 
-    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueMessageCheck('email:tag:family');
     await vi.advanceTimersByTimeAsync(100);
 
     expect(processMessages).not.toHaveBeenCalled();
@@ -187,27 +155,23 @@ describe('GroupQueue', () => {
 
     const processMessages = vi.fn(async () => {
       callCount++;
-      return false; // always fail
+      return false;
     });
 
     queue.setProcessMessagesFn(processMessages);
-    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueMessageCheck('email:tag:family');
 
-    // Run through all 5 retries (MAX_RETRIES = 5)
-    // Initial call
     await vi.advanceTimersByTimeAsync(10);
     expect(callCount).toBe(1);
 
-    // Retry 1: 5000ms, Retry 2: 10000ms, Retry 3: 20000ms, Retry 4: 40000ms, Retry 5: 80000ms
     const retryDelays = [5000, 10000, 20000, 40000, 80000];
     for (let i = 0; i < retryDelays.length; i++) {
       await vi.advanceTimersByTimeAsync(retryDelays[i] + 10);
       expect(callCount).toBe(i + 2);
     }
 
-    // After 5 retries (6 total calls), should stop — no more retries
     const countAfterMaxRetries = callCount;
-    await vi.advanceTimersByTimeAsync(200000); // Wait a long time
+    await vi.advanceTimersByTimeAsync(200000);
     expect(callCount).toBe(countAfterMaxRetries);
   });
 
@@ -217,29 +181,26 @@ describe('GroupQueue', () => {
     const processed: string[] = [];
     const completionCallbacks: Array<() => void> = [];
 
-    const processMessages = vi.fn(async (groupJid: string) => {
-      processed.push(groupJid);
+    const processMessages = vi.fn(async (chatId: string) => {
+      processed.push(chatId);
       await new Promise<void>((resolve) => completionCallbacks.push(resolve));
       return true;
     });
 
     queue.setProcessMessagesFn(processMessages);
 
-    // Fill both slots
-    queue.enqueueMessageCheck('group1@g.us');
-    queue.enqueueMessageCheck('group2@g.us');
+    queue.enqueueMessageCheck('email:tag:family');
+    queue.enqueueMessageCheck('email:tag:work');
     await vi.advanceTimersByTimeAsync(10);
 
-    // Queue a third
-    queue.enqueueMessageCheck('group3@g.us');
+    queue.enqueueMessageCheck('email:tag:admin');
     await vi.advanceTimersByTimeAsync(10);
 
-    expect(processed).toEqual(['group1@g.us', 'group2@g.us']);
+    expect(processed).toEqual(['email:tag:family', 'email:tag:work']);
 
-    // Free up a slot
     completionCallbacks[0]();
     await vi.advanceTimersByTimeAsync(10);
 
-    expect(processed).toContain('group3@g.us');
+    expect(processed).toContain('email:tag:admin');
   });
 });

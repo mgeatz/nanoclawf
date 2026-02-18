@@ -11,25 +11,24 @@ import {
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
 
-// Set up registered groups used across tests
 const MAIN_GROUP: RegisteredGroup = {
   name: 'Main',
   folder: 'main',
-  trigger: 'always',
+  tag: 'admin',
   added_at: '2024-01-01T00:00:00.000Z',
 };
 
 const OTHER_GROUP: RegisteredGroup = {
   name: 'Other',
   folder: 'other-group',
-  trigger: '@Andy',
+  tag: 'other',
   added_at: '2024-01-01T00:00:00.000Z',
 };
 
 const THIRD_GROUP: RegisteredGroup = {
   name: 'Third',
   folder: 'third-group',
-  trigger: '@Andy',
+  tag: 'third',
   added_at: '2024-01-01T00:00:00.000Z',
 };
 
@@ -40,27 +39,18 @@ beforeEach(() => {
   _initTestDatabase();
 
   groups = {
-    'main@g.us': MAIN_GROUP,
-    'other@g.us': OTHER_GROUP,
-    'third@g.us': THIRD_GROUP,
+    'email:tag:admin': MAIN_GROUP,
+    'email:tag:other': OTHER_GROUP,
+    'email:tag:third': THIRD_GROUP,
   };
 
-  // Populate DB as well
-  setRegisteredGroup('main@g.us', MAIN_GROUP);
-  setRegisteredGroup('other@g.us', OTHER_GROUP);
-  setRegisteredGroup('third@g.us', THIRD_GROUP);
+  setRegisteredGroup('email:tag:admin', MAIN_GROUP);
+  setRegisteredGroup('email:tag:other', OTHER_GROUP);
+  setRegisteredGroup('email:tag:third', THIRD_GROUP);
 
   deps = {
     sendMessage: async () => {},
     registeredGroups: () => groups,
-    registerGroup: (jid, group) => {
-      groups[jid] = group;
-      setRegisteredGroup(jid, group);
-      // Mock the fs.mkdirSync that registerGroup does
-    },
-    syncGroupMetadata: async () => {},
-    getAvailableGroups: () => [],
-    writeGroupsSnapshot: () => {},
   };
 });
 
@@ -74,14 +64,13 @@ describe('schedule_task authorization', () => {
         prompt: 'do something',
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00.000Z',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
       deps,
     );
 
-    // Verify task was created in DB for the other group
     const allTasks = getAllTasks();
     expect(allTasks.length).toBe(1);
     expect(allTasks[0].group_folder).toBe('other-group');
@@ -94,7 +83,7 @@ describe('schedule_task authorization', () => {
         prompt: 'self task',
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00.000Z',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'other-group',
       false,
@@ -113,7 +102,7 @@ describe('schedule_task authorization', () => {
         prompt: 'unauthorized',
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00.000Z',
-        targetJid: 'main@g.us',
+        targetChatId: 'email:tag:admin',
       },
       'other-group',
       false,
@@ -124,14 +113,14 @@ describe('schedule_task authorization', () => {
     expect(allTasks.length).toBe(0);
   });
 
-  it('rejects schedule_task for unregistered target JID', async () => {
+  it('rejects schedule_task for unregistered target', async () => {
     await processTaskIpc(
       {
         type: 'schedule_task',
         prompt: 'no target',
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00.000Z',
-        targetJid: 'unknown@g.us',
+        targetChatId: 'email:tag:unknown',
       },
       'main',
       true,
@@ -150,7 +139,7 @@ describe('pause_task authorization', () => {
     createTask({
       id: 'task-main',
       group_folder: 'main',
-      chat_jid: 'main@g.us',
+      chat_id: 'email:tag:admin',
       prompt: 'main task',
       schedule_type: 'once',
       schedule_value: '2025-06-01T00:00:00.000Z',
@@ -162,7 +151,7 @@ describe('pause_task authorization', () => {
     createTask({
       id: 'task-other',
       group_folder: 'other-group',
-      chat_jid: 'other@g.us',
+      chat_id: 'email:tag:other',
       prompt: 'other task',
       schedule_type: 'once',
       schedule_value: '2025-06-01T00:00:00.000Z',
@@ -196,7 +185,7 @@ describe('resume_task authorization', () => {
     createTask({
       id: 'task-paused',
       group_folder: 'other-group',
-      chat_jid: 'other@g.us',
+      chat_id: 'email:tag:other',
       prompt: 'paused task',
       schedule_type: 'once',
       schedule_value: '2025-06-01T00:00:00.000Z',
@@ -230,7 +219,7 @@ describe('cancel_task authorization', () => {
     createTask({
       id: 'task-to-cancel',
       group_folder: 'other-group',
-      chat_jid: 'other@g.us',
+      chat_id: 'email:tag:other',
       prompt: 'cancel me',
       schedule_type: 'once',
       schedule_value: '2025-06-01T00:00:00.000Z',
@@ -248,7 +237,7 @@ describe('cancel_task authorization', () => {
     createTask({
       id: 'task-own',
       group_folder: 'other-group',
-      chat_jid: 'other@g.us',
+      chat_id: 'email:tag:other',
       prompt: 'my task',
       schedule_type: 'once',
       schedule_value: '2025-06-01T00:00:00.000Z',
@@ -266,7 +255,7 @@ describe('cancel_task authorization', () => {
     createTask({
       id: 'task-foreign',
       group_folder: 'main',
-      chat_jid: 'main@g.us',
+      chat_id: 'email:tag:admin',
       prompt: 'not yours',
       schedule_type: 'once',
       schedule_value: '2025-06-01T00:00:00.000Z',
@@ -281,79 +270,43 @@ describe('cancel_task authorization', () => {
   });
 });
 
-// --- register_group authorization ---
-
-describe('register_group authorization', () => {
-  it('non-main group cannot register a group', async () => {
-    await processTaskIpc(
-      {
-        type: 'register_group',
-        jid: 'new@g.us',
-        name: 'New Group',
-        folder: 'new-group',
-        trigger: '@Andy',
-      },
-      'other-group',
-      false,
-      deps,
-    );
-
-    // registeredGroups should not have changed
-    expect(groups['new@g.us']).toBeUndefined();
-  });
-});
-
-// --- refresh_groups authorization ---
-
-describe('refresh_groups authorization', () => {
-  it('non-main group cannot trigger refresh', async () => {
-    // This should be silently blocked (no crash, no effect)
-    await processTaskIpc({ type: 'refresh_groups' }, 'other-group', false, deps);
-    // If we got here without error, the auth gate worked
-  });
-});
-
 // --- IPC message authorization ---
-// Tests the authorization pattern from startIpcWatcher (ipc.ts).
-// The logic: isMain || (targetGroup && targetGroup.folder === sourceGroup)
 
 describe('IPC message authorization', () => {
-  // Replicate the exact check from the IPC watcher
   function isMessageAuthorized(
     sourceGroup: string,
     isMain: boolean,
-    targetChatJid: string,
+    targetChatId: string,
     registeredGroups: Record<string, RegisteredGroup>,
   ): boolean {
-    const targetGroup = registeredGroups[targetChatJid];
+    const targetGroup = registeredGroups[targetChatId];
     return isMain || (!!targetGroup && targetGroup.folder === sourceGroup);
   }
 
   it('main group can send to any group', () => {
-    expect(isMessageAuthorized('main', true, 'other@g.us', groups)).toBe(true);
-    expect(isMessageAuthorized('main', true, 'third@g.us', groups)).toBe(true);
+    expect(isMessageAuthorized('main', true, 'email:tag:other', groups)).toBe(true);
+    expect(isMessageAuthorized('main', true, 'email:tag:third', groups)).toBe(true);
   });
 
   it('non-main group can send to its own chat', () => {
-    expect(isMessageAuthorized('other-group', false, 'other@g.us', groups)).toBe(true);
+    expect(isMessageAuthorized('other-group', false, 'email:tag:other', groups)).toBe(true);
   });
 
   it('non-main group cannot send to another groups chat', () => {
-    expect(isMessageAuthorized('other-group', false, 'main@g.us', groups)).toBe(false);
-    expect(isMessageAuthorized('other-group', false, 'third@g.us', groups)).toBe(false);
+    expect(isMessageAuthorized('other-group', false, 'email:tag:admin', groups)).toBe(false);
+    expect(isMessageAuthorized('other-group', false, 'email:tag:third', groups)).toBe(false);
   });
 
-  it('non-main group cannot send to unregistered JID', () => {
-    expect(isMessageAuthorized('other-group', false, 'unknown@g.us', groups)).toBe(false);
+  it('non-main group cannot send to unregistered chat', () => {
+    expect(isMessageAuthorized('other-group', false, 'email:tag:unknown', groups)).toBe(false);
   });
 
-  it('main group can send to unregistered JID', () => {
-    // Main is always authorized regardless of target
-    expect(isMessageAuthorized('main', true, 'unknown@g.us', groups)).toBe(true);
+  it('main group can send to unregistered chat', () => {
+    expect(isMessageAuthorized('main', true, 'email:tag:unknown', groups)).toBe(true);
   });
 });
 
-// --- schedule_task with cron and interval types ---
+// --- schedule_task schedule types ---
 
 describe('schedule_task schedule types', () => {
   it('creates task with cron schedule and computes next_run', async () => {
@@ -362,8 +315,8 @@ describe('schedule_task schedule types', () => {
         type: 'schedule_task',
         prompt: 'cron task',
         schedule_type: 'cron',
-        schedule_value: '0 9 * * *', // every day at 9am
-        targetJid: 'other@g.us',
+        schedule_value: '0 9 * * *',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -374,7 +327,6 @@ describe('schedule_task schedule types', () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0].schedule_type).toBe('cron');
     expect(tasks[0].next_run).toBeTruthy();
-    // next_run should be a valid ISO date in the future
     expect(new Date(tasks[0].next_run!).getTime()).toBeGreaterThan(Date.now() - 60000);
   });
 
@@ -385,7 +337,7 @@ describe('schedule_task schedule types', () => {
         prompt: 'bad cron',
         schedule_type: 'cron',
         schedule_value: 'not a cron',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -403,8 +355,8 @@ describe('schedule_task schedule types', () => {
         type: 'schedule_task',
         prompt: 'interval task',
         schedule_type: 'interval',
-        schedule_value: '3600000', // 1 hour
-        targetJid: 'other@g.us',
+        schedule_value: '3600000',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -414,7 +366,6 @@ describe('schedule_task schedule types', () => {
     const tasks = getAllTasks();
     expect(tasks).toHaveLength(1);
     expect(tasks[0].schedule_type).toBe('interval');
-    // next_run should be ~1 hour from now
     const nextRun = new Date(tasks[0].next_run!).getTime();
     expect(nextRun).toBeGreaterThanOrEqual(before + 3600000 - 1000);
     expect(nextRun).toBeLessThanOrEqual(Date.now() + 3600000 + 1000);
@@ -427,7 +378,7 @@ describe('schedule_task schedule types', () => {
         prompt: 'bad interval',
         schedule_type: 'interval',
         schedule_value: 'abc',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -444,7 +395,7 @@ describe('schedule_task schedule types', () => {
         prompt: 'zero interval',
         schedule_type: 'interval',
         schedule_value: '0',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -461,7 +412,7 @@ describe('schedule_task schedule types', () => {
         prompt: 'bad once',
         schedule_type: 'once',
         schedule_value: 'not-a-date',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -483,7 +434,7 @@ describe('schedule_task context_mode', () => {
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00.000Z',
         context_mode: 'group',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -502,7 +453,7 @@ describe('schedule_task context_mode', () => {
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00.000Z',
         context_mode: 'isolated',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -521,7 +472,7 @@ describe('schedule_task context_mode', () => {
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00.000Z',
         context_mode: 'bogus' as any,
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -539,7 +490,7 @@ describe('schedule_task context_mode', () => {
         prompt: 'no context mode',
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00.000Z',
-        targetJid: 'other@g.us',
+        targetChatId: 'email:tag:other',
       },
       'main',
       true,
@@ -548,47 +499,5 @@ describe('schedule_task context_mode', () => {
 
     const tasks = getAllTasks();
     expect(tasks[0].context_mode).toBe('isolated');
-  });
-});
-
-// --- register_group success path ---
-
-describe('register_group success', () => {
-  it('main group can register a new group', async () => {
-    await processTaskIpc(
-      {
-        type: 'register_group',
-        jid: 'new@g.us',
-        name: 'New Group',
-        folder: 'new-group',
-        trigger: '@Andy',
-      },
-      'main',
-      true,
-      deps,
-    );
-
-    // Verify group was registered in DB
-    const group = getRegisteredGroup('new@g.us');
-    expect(group).toBeDefined();
-    expect(group!.name).toBe('New Group');
-    expect(group!.folder).toBe('new-group');
-    expect(group!.trigger).toBe('@Andy');
-  });
-
-  it('register_group rejects request with missing fields', async () => {
-    await processTaskIpc(
-      {
-        type: 'register_group',
-        jid: 'partial@g.us',
-        name: 'Partial',
-        // missing folder and trigger
-      },
-      'main',
-      true,
-      deps,
-    );
-
-    expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
   });
 });
