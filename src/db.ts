@@ -99,6 +99,15 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add trigger_depth column for trigger email loop protection
+  try {
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN trigger_depth INTEGER DEFAULT 0`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Migration: drop container_config and requires_trigger if they exist (v1 → v2)
   // SQLite doesn't support DROP COLUMN before 3.35, so we just ignore the old columns
   try {
@@ -187,7 +196,7 @@ export function getAllChats(): ChatInfo[] {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, trigger_depth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_id,
@@ -197,6 +206,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.triggerDepth || 0,
   );
 }
 
@@ -235,7 +245,7 @@ export function getNewMessages(
 
   const placeholders = chatIds.map(() => '?').join(',');
   const sql = `
-    SELECT id, chat_jid as chat_id, sender, sender_name, content, timestamp
+    SELECT id, chat_jid as chat_id, sender, sender_name, content, timestamp, trigger_depth as triggerDepth
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders})
       AND is_bot_message = 0
@@ -259,7 +269,7 @@ export function getMessagesSince(
   sinceTimestamp: string,
 ): NewMessage[] {
   const sql = `
-    SELECT id, chat_jid as chat_id, sender, sender_name, content, timestamp
+    SELECT id, chat_jid as chat_id, sender, sender_name, content, timestamp, trigger_depth as triggerDepth
     FROM messages
     WHERE chat_jid = ? AND timestamp > ?
       AND is_bot_message = 0

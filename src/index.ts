@@ -28,6 +28,7 @@ import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
 import { formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { startMonitor } from './monitor.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -39,6 +40,8 @@ let messageLoopRunning = false;
 
 let emailChannel: EmailChannel;
 const queue = new GroupQueue();
+const activeAgents: Record<string, { chatId: string; startedAt: number }> = {};
+const startupTime = Date.now();
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -129,6 +132,13 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
 
   const sessionId = sessions[group.folder];
 
+  // Compute max trigger depth from messages (for loop protection)
+  const maxTriggerDepth = missedMessages.reduce(
+    (max, m) => Math.max(max, m.triggerDepth || 0),
+    0,
+  );
+
+  activeAgents[group.folder] = { chatId, startedAt: Date.now() };
   try {
     const output = await runOpenCodeAgent({
       groupFolder: group.folder,
@@ -136,6 +146,7 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
       isMain: isMainGroup,
       prompt,
       sessionId,
+      triggerDepth: maxTriggerDepth,
     });
 
     if (output.sessionId) {
@@ -168,6 +179,8 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
     lastAgentTimestamp[chatId] = previousCursor;
     saveState();
     return false;
+  } finally {
+    delete activeAgents[group.folder];
   }
 }
 
@@ -272,10 +285,34 @@ async function main(): Promise<void> {
   });
   startIpcWatcher({
     sendMessage: (chatId, text) => emailChannel.sendMessage(chatId, text),
+    sendTriggerEmail: (subject, body, depth) =>
+      emailChannel.sendSelfEmail(subject, body, depth),
     registeredGroups: () => registeredGroups,
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+
+  // Start heartbeat writer (every 5 minutes)
+  const heartbeatFile = path.join(DATA_DIR, 'heartbeat.json');
+  const writeHeartbeat = () => {
+    const heartbeat = {
+      alive: true,
+      timestamp: new Date().toISOString(),
+      uptime_ms: Date.now() - startupTime,
+      imap_connected: emailChannel.isConnected(),
+      registered_groups: Object.keys(registeredGroups).length,
+      active_tasks: getAllTasks().filter((t) => t.status === 'active').length,
+      active_agents: Object.keys(activeAgents).length,
+    };
+    fs.mkdirSync(path.dirname(heartbeatFile), { recursive: true });
+    fs.writeFileSync(heartbeatFile, JSON.stringify(heartbeat, null, 2));
+  };
+  writeHeartbeat();
+  setInterval(writeHeartbeat, 5 * 60 * 1000);
+
+  // Start status dashboard
+  startMonitor({ activeAgents: () => activeAgents });
+
   startMessageLoop();
 }
 

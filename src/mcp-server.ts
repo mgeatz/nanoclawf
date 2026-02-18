@@ -15,6 +15,8 @@ const DATA_DIR = path.resolve(process.cwd(), '..', '..', 'data');
 const chatId = process.env.NANOCLAW_CHAT_ID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+const triggerDepth = parseInt(process.env.NANOCLAW_TRIGGER_DEPTH || '0', 10);
+const MAX_TRIGGER_DEPTH = parseInt(process.env.MAX_TRIGGER_DEPTH || '3', 10);
 
 const IPC_DIR = path.join(DATA_DIR, 'ipc', groupFolder);
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -57,6 +59,68 @@ server.tool(
     writeIpcFile(MESSAGES_DIR, data);
 
     return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+  },
+);
+
+server.tool(
+  'trigger_email',
+  `Send a self-to-self email to trigger work in any group. The email will be picked up by NanoClaw's IMAP poller and routed to the group matching the tag.
+
+Use cases:
+- Cross-group communication: trigger work in another group's context
+- Workflow chaining: send next step to yourself after completing current step
+- Deferred work: queue up a task for later processing
+
+IMPORTANT: Do NOT use this in a loop. If your prompt was triggered by a trigger_email, do NOT send another trigger_email to the same tag unless explicitly instructed by the user.`,
+  {
+    tag: z.string().describe('The group tag (e.g., "family", "work", "ADMIN"). Case insensitive.'),
+    subject_suffix: z.string().optional().describe('Optional text after [tag] in subject. Default: "Agent Trigger"'),
+    body: z.string().describe('The email body — this becomes the prompt for the target group agent'),
+  },
+  async (args) => {
+    if (triggerDepth >= MAX_TRIGGER_DEPTH) {
+      return {
+        content: [{ type: 'text' as const, text: `Trigger depth limit reached (${triggerDepth}/${MAX_TRIGGER_DEPTH}). Cannot send trigger_email to prevent infinite loops.` }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'trigger_email',
+      tag: args.tag,
+      subject: `[${args.tag}] ${args.subject_suffix || 'Agent Trigger'}`,
+      body: args.body,
+      sourceGroup: groupFolder,
+      isMain,
+      triggerDepth,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Trigger email queued: [${args.tag}] ${args.subject_suffix || 'Agent Trigger'}` }],
+    };
+  },
+);
+
+server.tool(
+  'get_system_status',
+  'Get NanoClaw system status: uptime, IMAP connection, active groups, pending tasks.',
+  {},
+  async () => {
+    const heartbeatFile = path.join(DATA_DIR, 'heartbeat.json');
+    try {
+      if (!fs.existsSync(heartbeatFile)) {
+        return { content: [{ type: 'text' as const, text: 'System status not available yet.' }] };
+      }
+      const status = fs.readFileSync(heartbeatFile, 'utf-8');
+      return { content: [{ type: 'text' as const, text: status }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error reading status: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
   },
 );
 

@@ -50,6 +50,7 @@ beforeEach(() => {
 
   deps = {
     sendMessage: async () => {},
+    sendTriggerEmail: async () => {},
     registeredGroups: () => groups,
   };
 });

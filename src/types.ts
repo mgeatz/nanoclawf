@@ -17,6 +17,7 @@ export interface NewMessage {
   is_bot_message?: boolean;
   subject?: string;
   message_id?: string;
+  triggerDepth?: number;
 }
 
 export interface ScheduledTask {

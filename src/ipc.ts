@@ -7,6 +7,8 @@ import {
   DATA_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
+  MAX_TRIGGERS_PER_HOUR,
+  TRIGGER_COOLDOWN_MS,
   TIMEZONE,
 } from './config.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
@@ -15,7 +17,48 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (chatId: string, text: string) => Promise<void>;
+  sendTriggerEmail: (subject: string, body: string, triggerDepth: number) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
+}
+
+// Rate limiting state for trigger emails
+const triggerCooldowns = new Map<string, number>();
+let triggerCountThisHour = 0;
+let hourResetTime = Date.now() + 3_600_000;
+
+export function checkTriggerRateLimit(sourceGroup: string, targetTag: string): string | null {
+  const now = Date.now();
+
+  if (now > hourResetTime) {
+    triggerCountThisHour = 0;
+    hourResetTime = now + 3_600_000;
+  }
+
+  if (triggerCountThisHour >= MAX_TRIGGERS_PER_HOUR) {
+    return `Global trigger rate limit exceeded (${MAX_TRIGGERS_PER_HOUR}/hour)`;
+  }
+
+  const key = `${sourceGroup}:${targetTag}`;
+  const lastTime = triggerCooldowns.get(key) || 0;
+  if (now - lastTime < TRIGGER_COOLDOWN_MS) {
+    const remaining = Math.ceil((TRIGGER_COOLDOWN_MS - (now - lastTime)) / 1000);
+    return `Cooldown active for ${sourceGroup} → ${targetTag}: ${remaining}s remaining`;
+  }
+
+  return null;
+}
+
+export function recordTrigger(sourceGroup: string, targetTag: string): void {
+  triggerCooldowns.set(`${sourceGroup}:${targetTag}`, Date.now());
+  triggerCountThisHour++;
+}
+
+export function getTriggerCountThisHour(): number {
+  if (Date.now() > hourResetTime) {
+    triggerCountThisHour = 0;
+    hourResetTime = Date.now() + 3_600_000;
+  }
+  return triggerCountThisHour;
 }
 
 let ipcWatcherRunning = false;
@@ -149,6 +192,10 @@ export async function processTaskIpc(
     context_mode?: string;
     groupFolder?: string;
     targetChatId?: string;
+    tag?: string;
+    subject?: string;
+    body?: string;
+    triggerDepth?: number;
   },
   sourceGroup: string,
   isMain: boolean,
@@ -299,6 +346,41 @@ export async function processTaskIpc(
             'Unauthorized task cancel attempt',
           );
         }
+      }
+      break;
+
+    case 'trigger_email':
+      if (data.tag && data.subject && data.body) {
+        const targetTag = data.tag.toLowerCase();
+
+        // Authorization: non-main can only trigger their own tag
+        if (!isMain) {
+          const sourceTag = Object.values(registeredGroups).find(
+            (g) => g.folder === sourceGroup,
+          )?.tag;
+          if (sourceTag !== targetTag) {
+            logger.warn(
+              { sourceGroup, targetTag },
+              'Unauthorized trigger_email attempt blocked',
+            );
+            break;
+          }
+        }
+
+        // Rate limiting
+        const rateLimitMsg = checkTriggerRateLimit(sourceGroup, targetTag);
+        if (rateLimitMsg) {
+          logger.warn({ sourceGroup, targetTag, reason: rateLimitMsg }, 'Trigger rate-limited');
+          break;
+        }
+
+        recordTrigger(sourceGroup, targetTag);
+        const depth = typeof data.triggerDepth === 'number' ? data.triggerDepth : 0;
+        await deps.sendTriggerEmail(data.subject, data.body, depth);
+        logger.info(
+          { sourceGroup, targetTag, depth },
+          'Trigger email sent via IPC',
+        );
       }
       break;
 

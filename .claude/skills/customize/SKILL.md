@@ -1,107 +1,86 @@
 ---
 name: customize
-description: Add new capabilities or modify NanoClaw behavior. Use when user wants to add channels (Telegram, Slack, email input), change triggers, add integrations, modify the router, or make any other customizations. This is an interactive skill that asks questions to understand what the user wants.
+description: Customize NanoClaw behavior. Use when user wants to add MCP tools, change the Ollama model, modify agent behavior, add groups, or configure integrations. Triggers on "customize", "add tool", "change model", "configure", "integration".
 ---
 
-# NanoClaw Customization
+# NanoClaw Customize
 
-This skill helps users add capabilities or modify behavior. Use AskUserQuestion to understand what they want before making changes.
+Interactive customization for NanoClaw. Ask what the user wants to change.
 
-## Workflow
+## Adding MCP Tools
 
-1. **Understand the request** - Ask clarifying questions
-2. **Plan the changes** - Identify files to modify
-3. **Implement** - Make changes directly to the code
-4. **Test guidance** - Tell user how to verify
+MCP tools are defined in `src/mcp-server.ts` and available to all agents via OpenCode.
 
-## Key Files
+To add a new tool:
+1. Add the tool definition using `server.tool()` in `src/mcp-server.ts`
+2. If the tool needs IPC (host-side processing), add a handler in `src/ipc.ts`
+3. Rebuild: `npm run build`
+4. Restart the service
 
-| File | Purpose |
-|------|---------|
-| `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
-| `src/ipc.ts` | IPC watcher and task processing |
-| `src/router.ts` | Message formatting and outbound routing |
-| `src/types.ts` | TypeScript interfaces (includes Channel) |
-| `src/config.ts` | Assistant name, trigger pattern, directories |
-| `src/db.ts` | Database initialization and queries |
-| `src/whatsapp-auth.ts` | Standalone WhatsApp authentication script |
-| `groups/CLAUDE.md` | Global memory/persona |
-
-## Common Customization Patterns
-
-### Adding a New Input Channel (e.g., Telegram, Slack, Email)
-
-Questions to ask:
-- Which channel? (Telegram, Slack, Discord, email, SMS, etc.)
-- Same trigger word or different?
-- Same memory hierarchy or separate?
-- Should messages from this channel go to existing groups or new ones?
-
-Implementation pattern:
-1. Create `src/channels/{name}.ts` implementing the `Channel` interface from `src/types.ts` (see `src/channels/whatsapp.ts` for reference)
-2. Add the channel instance to `main()` in `src/index.ts` and wire callbacks (`onMessage`, `onChatMetadata`)
-3. Messages are stored via the `onMessage` callback; routing is automatic via `ownsJid()`
-
-### Adding a New MCP Integration
-
-Questions to ask:
-- What service? (Calendar, Notion, database, etc.)
-- What operations needed? (read, write, both)
-- Which groups should have access?
-
-Implementation:
-1. Add MCP server config to the container settings (see `src/container-runner.ts` for how MCP servers are mounted)
-2. Document available tools in `groups/CLAUDE.md`
-
-### Changing Assistant Behavior
-
-Questions to ask:
-- What aspect? (name, trigger, persona, response style)
-- Apply to all groups or specific ones?
-
-Simple changes → edit `src/config.ts`
-Persona changes → edit `groups/CLAUDE.md`
-Per-group behavior → edit specific group's `CLAUDE.md`
-
-### Adding New Commands
-
-Questions to ask:
-- What should the command do?
-- Available in all groups or main only?
-- Does it need new MCP tools?
-
-Implementation:
-1. Commands are handled by the agent naturally — add instructions to `groups/CLAUDE.md` or the group's `CLAUDE.md`
-2. For trigger-level routing changes, modify `processGroupMessages()` in `src/index.ts`
-
-### Changing Deployment
-
-Questions to ask:
-- Target platform? (Linux server, Docker, different Mac)
-- Service manager? (systemd, Docker, supervisord)
-
-Implementation:
-1. Create appropriate service files
-2. Update paths in config
-3. Provide setup instructions
-
-## After Changes
-
-Always tell the user:
-```bash
-# Rebuild and restart
-npm run build
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+Example tool pattern:
+```typescript
+server.tool(
+  'tool_name',
+  'Description of what this tool does',
+  { param: z.string().describe('Parameter description') },
+  async (args) => {
+    // Write IPC file for host processing, or handle directly
+    writeIpcFile(TASKS_DIR, { type: 'tool_name', ...args });
+    return { content: [{ type: 'text', text: 'Done.' }] };
+  },
+);
 ```
 
-## Example Interaction
+## Changing the Ollama Model
 
-User: "Add Telegram as an input channel"
+1. Pull the new model: `ollama pull <model-name>`
+2. Update `.env`: `OPENCODE_MODEL=ollama/<model-name>`
+3. Update `~/.config/opencode/opencode.json` provider config to match
+4. Restart NanoClaw
 
-1. Ask: "Should Telegram use the same @Andy trigger, or a different one?"
-2. Ask: "Should Telegram messages create separate conversation contexts, or share with WhatsApp groups?"
-3. Create `src/channels/telegram.ts` implementing the `Channel` interface (see `src/channels/whatsapp.ts`)
-4. Add the channel to `main()` in `src/index.ts`
-5. Tell user how to authenticate and test
+## Modifying Agent Behavior
+
+Agent instructions live in CLAUDE.md files:
+- `groups/global/CLAUDE.md` — Instructions for ALL agents
+- `groups/main/CLAUDE.md` — Instructions for the admin agent only
+- `groups/<name>/CLAUDE.md` — Per-group instructions
+
+Edit these files to change agent personality, add skills, restrict behavior, etc.
+
+## Adding Groups
+
+Groups auto-register when a new email tag is used. Send a self-to-self email with `[newtag] Hello` and a new group will be created automatically.
+
+To pre-configure a group:
+1. Create the directory: `mkdir -p groups/<tag>/logs`
+2. Add a `CLAUDE.md` with group-specific instructions
+3. Register in DB (or just send the first email)
+
+## Configuring Trigger Emails
+
+Trigger email settings in `.env`:
+- `MAX_TRIGGER_DEPTH=3` — Max chain depth for trigger emails
+- `TRIGGER_COOLDOWN_MS=60000` — Cooldown between triggers (same source→target pair)
+- `MAX_TRIGGERS_PER_HOUR=30` — Global hourly limit
+
+## Configuring Scheduled Tasks
+
+Tasks are created by agents using the `schedule_task` MCP tool. To manually create a task, write a JSON file to `data/ipc/<group>/tasks/`:
+
+```json
+{
+  "type": "schedule_task",
+  "prompt": "Check system status and report",
+  "schedule_type": "cron",
+  "schedule_value": "0 9 * * *",
+  "context_mode": "isolated",
+  "targetChatId": "email:tag:admin"
+}
+```
+
+## Monitoring
+
+- Dashboard: `http://localhost:3700` (auto-refreshes every 5s)
+- Heartbeat: `data/heartbeat.json` (updated every 5 min)
+- Agent logs: `groups/<name>/logs/`
+- Set `MONITOR_PORT` in `.env` to change the dashboard port

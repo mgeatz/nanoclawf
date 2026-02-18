@@ -57,6 +57,32 @@ export const MAX_CONCURRENT_AGENTS = Math.max(
 
 export const IPC_POLL_INTERVAL = 1000;
 
+// Trigger email rate limiting
+export const MAX_TRIGGER_DEPTH = parseInt(
+  process.env.MAX_TRIGGER_DEPTH || '3',
+  10,
+);
+export const TRIGGER_COOLDOWN_MS = parseInt(
+  process.env.TRIGGER_COOLDOWN_MS || '60000',
+  10,
+);
+export const MAX_TRIGGERS_PER_HOUR = parseInt(
+  process.env.MAX_TRIGGERS_PER_HOUR || '30',
+  10,
+);
+
+// Heartbeat and monitoring
+export const HEARTBEAT_EMAIL_ENABLED =
+  (process.env.HEARTBEAT_EMAIL || '').toLowerCase() === 'true';
+export const HEARTBEAT_INTERVAL_MS = parseInt(
+  process.env.HEARTBEAT_INTERVAL || String(6 * 60 * 60 * 1000),
+  10,
+);
+export const MONITOR_PORT = parseInt(
+  process.env.MONITOR_PORT || '3700',
+  10,
+);
+
 // Timezone for scheduled tasks (cron expressions, etc.)
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;

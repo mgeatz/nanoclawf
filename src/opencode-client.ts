@@ -11,6 +11,7 @@ export interface AgentInput {
   isMain: boolean;
   prompt: string;
   sessionId?: string;
+  triggerDepth?: number;
 }
 
 export interface AgentOutput {
@@ -42,6 +43,7 @@ export async function runOpenCodeAgent(opts: AgentInput): Promise<AgentOutput> {
     NANOCLAW_CHAT_ID: opts.chatId,
     NANOCLAW_GROUP_FOLDER: opts.groupFolder,
     NANOCLAW_IS_MAIN: opts.isMain ? '1' : '0',
+    NANOCLAW_TRIGGER_DEPTH: String(opts.triggerDepth || 0),
   };
 
   logger.info(

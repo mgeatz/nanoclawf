@@ -253,6 +253,10 @@ export class EmailChannel implements Channel {
     const timestamp = (parsed.date || new Date()).toISOString();
     const emailMessageId = parsed.messageId || '';
 
+    // Extract trigger depth from custom header (set by sendSelfEmail)
+    const depthHeader = parsed.headers?.get('x-nanoclaw-trigger-depth');
+    const triggerDepth = depthHeader ? parseInt(String(depthHeader), 10) || 0 : 0;
+
     // Store thread info for reply threading
     if (emailMessageId) {
       setEmailThread(chatId, emailMessageId, subject);
@@ -278,6 +282,7 @@ export class EmailChannel implements Channel {
       is_bot_message: false,
       subject,
       message_id: emailMessageId,
+      triggerDepth: triggerDepth > 0 ? triggerDepth : undefined,
     };
 
     logger.info(
@@ -320,6 +325,23 @@ export class EmailChannel implements Channel {
       logger.info({ chatId, to: NOTIFICATION_EMAIL }, 'Agent response sent via email');
     } catch (err) {
       logger.error({ chatId, err }, 'Failed to send email');
+    }
+  }
+
+  async sendSelfEmail(subject: string, body: string, triggerDepth = 0): Promise<void> {
+    try {
+      await this.smtp.sendMail({
+        from: EMAIL_ADDRESS,
+        to: EMAIL_ADDRESS,
+        subject,
+        text: body,
+        headers: {
+          'X-NanoClaw-Trigger-Depth': String(triggerDepth + 1),
+        },
+      });
+      logger.info({ subject, triggerDepth }, 'Self-trigger email sent');
+    } catch (err) {
+      logger.error({ subject, err }, 'Failed to send self-trigger email');
     }
   }
 
