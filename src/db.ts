@@ -79,6 +79,18 @@ function createSchema(database: Database.Database): void {
       subject TEXT,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS activity_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      group_folder TEXT,
+      summary TEXT NOT NULL,
+      details_json TEXT,
+      task_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_activity_log_timestamp ON activity_log(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_activity_log_event_type ON activity_log(event_type);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -540,6 +552,83 @@ export function setEmailThread(chatId: string, messageId: string, subject?: stri
   db.prepare(
     `INSERT OR REPLACE INTO email_threads (chat_id, message_id, subject, updated_at) VALUES (?, ?, ?, ?)`,
   ).run(chatId, messageId, subject || null, now);
+}
+
+// --- Activity log ---
+
+export interface ActivityLogEntry {
+  id: number;
+  timestamp: string;
+  event_type: string;
+  group_folder: string | null;
+  summary: string;
+  details_json: string | null;
+  task_id: string | null;
+}
+
+export function logActivity(entry: {
+  event_type: string;
+  group_folder?: string | null;
+  summary: string;
+  details?: Record<string, unknown> | null;
+  task_id?: string | null;
+}): void {
+  db.prepare(
+    `INSERT INTO activity_log (timestamp, event_type, group_folder, summary, details_json, task_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    new Date().toISOString(),
+    entry.event_type,
+    entry.group_folder || null,
+    entry.summary,
+    entry.details ? JSON.stringify(entry.details) : null,
+    entry.task_id || null,
+  );
+}
+
+export function getActivityLog(
+  limit = 50,
+  offset = 0,
+  eventType?: string,
+): ActivityLogEntry[] {
+  if (eventType) {
+    return db
+      .prepare(
+        `SELECT * FROM activity_log WHERE event_type = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
+      )
+      .all(eventType, limit, offset) as ActivityLogEntry[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
+    )
+    .all(limit, offset) as ActivityLogEntry[];
+}
+
+export function getTaskRunStats(
+  taskId: string,
+): { total: number; successes: number; failures: number; avg_duration_ms: number } {
+  const row = db
+    .prepare(
+      `SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successes,
+        SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as failures,
+        AVG(duration_ms) as avg_duration_ms
+      FROM task_run_logs WHERE task_id = ?`,
+    )
+    .get(taskId) as {
+    total: number;
+    successes: number;
+    failures: number;
+    avg_duration_ms: number;
+  };
+  return row;
+}
+
+export function pruneActivityLog(keepDays = 7): void {
+  const cutoff = new Date(Date.now() - keepDays * 86400000).toISOString();
+  db.prepare('DELETE FROM activity_log WHERE timestamp < ?').run(cutoff);
 }
 
 // --- JSON migration ---

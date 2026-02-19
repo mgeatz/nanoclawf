@@ -13,12 +13,15 @@ import {
   getAllTasks,
   getDueTasks,
   getTaskById,
+  logActivity,
   logTaskRun,
+  updateTask,
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { runOpenCodeAgent } from './opencode-client.js';
+import { registerAgent, unregisterAgent, addAgentEvent } from './agent-tracker.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 export interface SchedulerDependencies {
@@ -55,6 +58,19 @@ function writeTasksSnapshot(
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
+function computeNextRun(task: ScheduledTask): string | null {
+  if (task.schedule_type === 'cron') {
+    const interval = CronExpressionParser.parse(task.schedule_value, {
+      tz: TIMEZONE,
+    });
+    return interval.next().toISOString();
+  } else if (task.schedule_type === 'interval') {
+    const ms = parseInt(task.schedule_value, 10);
+    return new Date(Date.now() + ms).toISOString();
+  }
+  return null;
+}
+
 async function runTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
@@ -63,10 +79,23 @@ async function runTask(
   const groupDir = path.join(GROUPS_DIR, task.group_folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
+  // Immediately advance next_run so the scheduler doesn't re-enqueue this task
+  const nextRun = computeNextRun(task);
+  if (nextRun) {
+    updateTask(task.id, { next_run: nextRun });
+  }
+
   logger.info(
     { taskId: task.id, group: task.group_folder },
     'Running scheduled task',
   );
+  logActivity({
+    event_type: 'task_scheduled_run',
+    group_folder: task.group_folder,
+    summary: `Task "${task.id}" started for [${task.group_folder}]`,
+    details: { promptPreview: task.prompt.slice(0, 200) },
+    task_id: task.id,
+  });
 
   const groups = deps.registeredGroups();
   const group = Object.values(groups).find(
@@ -113,6 +142,17 @@ async function runTask(
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
+  const groupModel = group.model;
+
+  registerAgent(task.group_folder, {
+    chatId: task.chat_id,
+    groupFolder: task.group_folder,
+    startedAt: startTime,
+    taskId: task.id,
+    prompt: task.prompt.slice(0, 200),
+    model: groupModel,
+  });
+
   try {
     const output = await runOpenCodeAgent({
       groupFolder: task.group_folder,
@@ -120,6 +160,8 @@ async function runTask(
       isMain,
       prompt: task.prompt,
       sessionId,
+      model: groupModel,
+      onEvent: (event) => addAgentEvent(task.group_folder, { time: Date.now(), ...event }),
     });
 
     if (output.status === 'error') {
@@ -149,24 +191,26 @@ async function runTask(
     result,
     error,
   });
+  logActivity({
+    event_type: error ? 'agent_error' : 'agent_completed',
+    group_folder: task.group_folder,
+    summary: error
+      ? `Task "${task.id}" failed: ${error.slice(0, 100)}`
+      : `Task "${task.id}" completed in ${(durationMs / 1000).toFixed(1)}s`,
+    details: { durationMs, resultPreview: result?.slice(0, 300), error },
+    task_id: task.id,
+  });
 
-  let nextRun: string | null = null;
-  if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, {
-      tz: TIMEZONE,
-    });
-    nextRun = interval.next().toISOString();
-  } else if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    nextRun = new Date(Date.now() + ms).toISOString();
-  }
+  unregisterAgent(task.group_folder);
 
+  // Recompute next_run from NOW (so the interval starts after completion, not from when we started)
+  const finalNextRun = computeNextRun(task);
   const resultSummary = error
     ? `Error: ${error}`
     : result
       ? result.slice(0, 200)
       : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  updateTaskAfterRun(task.id, finalNextRun, resultSummary);
 }
 
 let schedulerRunning = false;
@@ -182,21 +226,24 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   const loop = async () => {
     try {
       const dueTasks = getDueTasks();
-      if (dueTasks.length > 0) {
-        logger.info({ count: dueTasks.length }, 'Found due tasks');
-      }
 
+      let enqueued = 0;
       for (const task of dueTasks) {
         const currentTask = getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
           continue;
         }
 
-        deps.queue.enqueueTask(
+        const wasEnqueued = deps.queue.enqueueTask(
           currentTask.chat_id,
           currentTask.id,
           () => runTask(currentTask, deps),
         );
+        if (wasEnqueued) enqueued++;
+      }
+
+      if (enqueued > 0) {
+        logger.info({ enqueued, due: dueTasks.length }, 'Enqueued due tasks');
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

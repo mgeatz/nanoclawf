@@ -69,20 +69,20 @@ export class GroupQueue {
     this.runForGroup(chatId, 'messages');
   }
 
-  enqueueTask(chatId: string, taskId: string, fn: () => Promise<void>): void {
-    if (this.shuttingDown) return;
+  enqueueTask(chatId: string, taskId: string, fn: () => Promise<void>): boolean {
+    if (this.shuttingDown) return false;
 
     const state = this.getGroup(chatId);
 
     if (state.pendingTasks.some((t) => t.id === taskId)) {
       logger.debug({ chatId, taskId }, 'Task already queued, skipping');
-      return;
+      return false;
     }
 
     if (state.active) {
       state.pendingTasks.push({ id: taskId, chatId, fn });
       logger.debug({ chatId, taskId }, 'Agent active, task queued');
-      return;
+      return true;
     }
 
     if (this.activeCount >= MAX_CONCURRENT_AGENTS) {
@@ -94,10 +94,11 @@ export class GroupQueue {
         { chatId, taskId, activeCount: this.activeCount },
         'At concurrency limit, task queued',
       );
-      return;
+      return true;
     }
 
     this.runTask(chatId, { id: taskId, chatId, fn });
+    return true;
   }
 
   private async runForGroup(

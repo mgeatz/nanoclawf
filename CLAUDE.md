@@ -30,6 +30,7 @@ Single Node.js process that monitors IMAP for self-to-self emails, routes messag
 | Skill | When to Use |
 |-------|-------------|
 | `/setup` | First-time installation, email config, verify IMAP/SMTP + Ollama + OpenCode |
+| `/add-agent` | Add a new agent persona — creates group folder, CLAUDE.md, registers in DB |
 | `/customize` | Adding MCP tools, changing models, modifying agent behavior |
 | `/debug` | Email issues, agent errors, IPC problems, troubleshooting |
 
