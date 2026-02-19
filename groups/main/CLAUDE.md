@@ -45,10 +45,11 @@ schedule_task(
 
 ## Content Approval Workflow
 
-Echo drafts content → sends to you for review. You decide:
-- Approve and post manually
-- Ask Echo to revise (reply with feedback)
-- Reject with reason
+Echo drafts content → sends to you for review. To act on a draft, send a self-to-self email:
+- `[content] approve draft-{id}` — Echo posts to the target platform via browser automation
+- `[content] revise draft-{id} [feedback]` — Echo creates a revised version
+- `[content] reject draft-{id} [reason]` — Draft is marked rejected
+- `[content] approve all` — Post all pending drafts
 
 ## System Monitoring
 

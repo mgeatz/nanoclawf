@@ -17,6 +17,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (chatId: string, text: string) => Promise<void>;
+  queueDigest: (chatId: string, groupFolder: string, text: string) => void;
   sendTriggerEmail: (subject: string, body: string, triggerDepth: number) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
@@ -110,17 +111,45 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatId, data.text);
-                  logger.info(
-                    { chatId: data.chatId, sourceGroup },
-                    'IPC message sent',
-                  );
-                  logActivity({
-                    event_type: 'email_sent',
-                    group_folder: sourceGroup,
-                    summary: `IPC message sent from [${sourceGroup}]`,
-                    details: { chatId: data.chatId, textPreview: data.text?.slice(0, 200) },
-                  });
+                  const priority = data.priority || 'digest';
+
+                  if (priority === 'notify') {
+                    await deps.sendMessage(data.chatId, data.text);
+                    logger.info(
+                      { chatId: data.chatId, sourceGroup, priority },
+                      'IPC message sent (notify)',
+                    );
+                    logActivity({
+                      event_type: 'email_sent',
+                      group_folder: sourceGroup,
+                      summary: `[${sourceGroup}] sent notification email`,
+                      details: { chatId: data.chatId, priority, textPreview: data.text?.slice(0, 200) },
+                    });
+                  } else if (priority === 'digest') {
+                    deps.queueDigest(data.chatId, sourceGroup, data.text);
+                    logger.info(
+                      { chatId: data.chatId, sourceGroup, priority },
+                      'IPC message queued for digest',
+                    );
+                    logActivity({
+                      event_type: 'digest_queued',
+                      group_folder: sourceGroup,
+                      summary: `[${sourceGroup}] queued message for digest`,
+                      details: { chatId: data.chatId, priority, textPreview: data.text?.slice(0, 200) },
+                    });
+                  } else {
+                    // priority === 'log'
+                    logger.info(
+                      { chatId: data.chatId, sourceGroup, priority },
+                      'IPC message logged (no email)',
+                    );
+                    logActivity({
+                      event_type: 'agent_log',
+                      group_folder: sourceGroup,
+                      summary: `[${sourceGroup}] logged message (no email)`,
+                      details: { chatId: data.chatId, priority, textPreview: data.text?.slice(0, 200) },
+                    });
+                  }
                 } else {
                   logger.warn(
                     { chatId: data.chatId, sourceGroup },

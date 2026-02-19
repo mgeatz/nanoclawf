@@ -168,8 +168,7 @@ async function runTask(
       error = output.error || 'Unknown error';
     } else if (output.result) {
       result = output.result;
-      // Forward result to user
-      await deps.sendMessage(task.chat_id, output.result);
+      // Task output is NOT auto-emailed. Agents use send_message with priority.
     }
 
     logger.info(

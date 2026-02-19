@@ -1,4 +1,5 @@
 import { ImapFlow, type FetchMessageObject } from 'imapflow';
+import { marked } from 'marked';
 import { createTransport, type Transporter } from 'nodemailer';
 import { simpleParser, type AddressObject, type ParsedMail } from 'mailparser';
 
@@ -308,11 +309,16 @@ export class EmailChannel implements Channel {
     // Look up thread info for In-Reply-To headers
     const thread = getEmailThread(chatId);
 
+    // Convert markdown to HTML for rich-text email
+    const htmlBody = marked.parse(text) as string;
+    const html = `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 1.5; color: #333;">${htmlBody}</div>`;
+
     const mailOptions: {
       from: string;
       to: string;
       subject: string;
       text: string;
+      html: string;
       inReplyTo?: string;
       references?: string;
     } = {
@@ -320,6 +326,7 @@ export class EmailChannel implements Channel {
       to: NOTIFICATION_EMAIL,
       subject: `[${tag}] Agent Response`,
       text,
+      html,
     };
 
     if (thread?.message_id) {

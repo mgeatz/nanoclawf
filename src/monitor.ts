@@ -470,6 +470,8 @@ const HTML_PAGE = `<!DOCTYPE html>
     <button class="close" onclick="closeEditModal()">&times;</button>
     <h3>Edit Schedule</h3>
     <p style="color:#666;font-size:11px" id="edit-task-label"></p>
+    <label>Task Prompt</label>
+    <div id="edit-task-prompt" style="background:#0a0a0a;border:1px solid #222;border-radius:3px;padding:8px 10px;color:#bbb;font-size:11px;line-height:1.5;max-height:120px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;margin-bottom:4px"></div>
     <label>Schedule Type</label>
     <select id="edit-sched-type">
       <option value="cron">Cron</option>
@@ -579,9 +581,10 @@ function humanSchedule(type, value) {
   return value;
 }
 
-function openEditModal(taskId, schedType, schedValue) {
+function openEditModal(taskId, schedType, schedValue, prompt) {
   editingTaskId = taskId;
   document.getElementById('edit-task-label').textContent = taskId;
+  document.getElementById('edit-task-prompt').textContent = prompt || '(no prompt)';
   document.getElementById('edit-sched-type').value = schedType;
   document.getElementById('edit-sched-value').value = schedValue;
   document.getElementById('edit-error').textContent = '';
@@ -781,7 +784,7 @@ document.addEventListener('click', function(e) {
   if (agentCard) { openAgentOutput(agentCard.dataset.agent); return; }
   var editBtn = e.target.closest('.btn[data-edit]');
   if (editBtn) {
-    openEditModal(editBtn.dataset.edit, editBtn.dataset.stype, editBtn.dataset.sval);
+    openEditModal(editBtn.dataset.edit, editBtn.dataset.stype, editBtn.dataset.sval, editBtn.dataset.prompt);
     return;
   }
   var pauseBtn = e.target.closest('.btn[data-pause]');
@@ -880,7 +883,7 @@ async function refreshAll() {
           rate,
           String(t.totalRuns),
           '<div class="task-actions">' +
-            '<button class="btn btn-edit" data-edit="'+esc(t.id)+'" data-stype="'+esc(t.scheduleType)+'" data-sval="'+esc(t.scheduleValue)+'">Edit</button>' +
+            '<button class="btn btn-edit" data-edit="'+esc(t.id)+'" data-stype="'+esc(t.scheduleType)+'" data-sval="'+esc(t.scheduleValue)+'" data-prompt="'+esc(t.fullPrompt||'')+'">Edit</button>' +
             (t.status === 'paused'
               ? '<button class="btn btn-resume" data-resume="'+esc(t.id)+'">Resume</button>'
               : '<button class="btn btn-pause" data-pause="'+esc(t.id)+'">Pause</button>') +

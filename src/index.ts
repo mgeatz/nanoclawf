@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  DIGEST_INTERVAL_MS,
   MAIN_GROUP_FOLDER,
   MAIN_TAG,
   POLL_INTERVAL,
@@ -14,12 +15,14 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getAndClearDigestQueue,
   getMessagesSince,
   getNewMessages,
   getRouterState,
   initDatabase,
   logActivity,
   pruneActivityLog,
+  queueDigestMessage,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -195,10 +198,10 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
 
     const durationMs = Date.now() - agentStartedAt;
 
-    // Send result to user via email
+    // Send result to user via email — only for user-initiated messages (not triggers)
     if (output.result) {
       const text = formatOutbound(output.result);
-      if (text) {
+      if (text && maxTriggerDepth === 0) {
         await emailChannel.sendMessage(chatId, text);
       }
     }
@@ -328,6 +331,8 @@ async function main(): Promise<void> {
   });
   startIpcWatcher({
     sendMessage: (chatId, text) => emailChannel.sendMessage(chatId, text),
+    queueDigest: (chatId, groupFolder, text) =>
+      queueDigestMessage(chatId, groupFolder, text),
     sendTriggerEmail: (subject, body, depth) =>
       emailChannel.sendSelfEmail(subject, body, depth),
     registeredGroups: () => registeredGroups,
@@ -352,6 +357,73 @@ async function main(): Promise<void> {
   };
   writeHeartbeat();
   setInterval(writeHeartbeat, 5 * 60 * 1000);
+
+  // Digest email sender — batches digest-priority messages into periodic emails
+  const sendDigest = async () => {
+    try {
+      const items = getAndClearDigestQueue();
+      if (items.length === 0) return;
+
+      // Group by agent folder
+      const byGroup = new Map<string, string[]>();
+      for (const item of items) {
+        const existing = byGroup.get(item.group_folder);
+        if (existing) {
+          existing.push(item.text);
+        } else {
+          byGroup.set(item.group_folder, [item.text]);
+        }
+      }
+
+      // Format digest email
+      const now = new Date();
+      const dateStr = now.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+      const sections: string[] = [`NANOCLAW DIGEST - ${dateStr}`, ''];
+
+      for (const [folder, texts] of byGroup) {
+        const group = Object.values(registeredGroups).find(
+          (g) => g.folder === folder,
+        );
+        const label = group ? `[${group.tag}] ${group.name}` : `[${folder}]`;
+        sections.push(`${label}:`);
+        for (const text of texts) {
+          // Indent each message, truncate long ones
+          const preview = text.length > 500 ? text.slice(0, 500) + '...' : text;
+          sections.push(`- ${preview}`);
+        }
+        sections.push('');
+      }
+
+      const digestText = sections.join('\n');
+
+      // Send to the first chat_id found (they all share the same NOTIFICATION_EMAIL)
+      const chatId = items[0].chat_id;
+      await emailChannel.sendMessage(chatId, digestText);
+
+      logger.info(
+        { itemCount: items.length, groupCount: byGroup.size },
+        'Digest email sent',
+      );
+      logActivity({
+        event_type: 'digest_sent',
+        summary: `Digest sent: ${items.length} messages from ${byGroup.size} agent(s)`,
+        details: { itemCount: items.length, groups: [...byGroup.keys()] },
+      });
+    } catch (err) {
+      logger.error({ err }, 'Error sending digest');
+    }
+  };
+  setInterval(sendDigest, DIGEST_INTERVAL_MS);
+  logger.info(
+    { intervalMs: DIGEST_INTERVAL_MS },
+    'Digest sender started',
+  );
 
   // Prune activity log daily (keep 7 days)
   setInterval(() => pruneActivityLog(7), 24 * 60 * 60 * 1000);

@@ -216,6 +216,20 @@ const tasks = [
     schedule_value: '0 16 * * 5',
     context_mode: 'group' as const,
   },
+
+  // =============================================
+  // Social (SocialSpark) — Reddit engagement every 2 hours
+  // =============================================
+  {
+    id: 'task-social-reddit-engagement',
+    group_folder: 'social',
+    chat_id: 'email:tag:social',
+    prompt:
+      'Reddit engagement scan: Search relevant startup subreddits (r/startups, r/Entrepreneur, r/SideProject, r/smallbusiness, r/indiehackers, r/nocode, r/SaaS) for recent posts where Launch80 can add genuine value. Look for founders asking questions about idea validation, startup tools, community, mentorship, or early-stage challenges. Check groups/social/reddit-comments/ for today\'s drafts — if you already have 3 or more for today, skip silently with priority "log". For the most relevant post found, draft a helpful comment following the Reddit Engagement Workflow in your CLAUDE.md. The comment must lead with real value and naturally mention the Launch80 Discord (https://discord.gg/UCzFGTwaD4). Save the draft to groups/social/reddit-comments/ with frontmatter (id, subreddit, post_title, post_url, status: pending). Send the draft to admin via send_message with priority: "notify" including the post context, URL, and your drafted comment with approval instructions. If no worthy posts found, use priority: "log".',
+    schedule_type: 'interval' as const,
+    schedule_value: '7200000',
+    context_mode: 'group' as const,
+  },
 ];
 
 let created = 0;

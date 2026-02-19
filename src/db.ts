@@ -80,6 +80,14 @@ function createSchema(database: Database.Database): void {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS digest_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      text TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS activity_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       timestamp TEXT NOT NULL,
@@ -124,6 +132,12 @@ function createSchema(database: Database.Database): void {
   // SQLite doesn't support DROP COLUMN before 3.35, so we just ignore the old columns
   try {
     database.exec(`ALTER TABLE registered_groups ADD COLUMN auto_registered INTEGER DEFAULT 0`);
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(`ALTER TABLE registered_groups ADD COLUMN model TEXT`);
   } catch {
     /* column already exists */
   }
@@ -485,6 +499,7 @@ export function getRegisteredGroup(
         trigger_pattern: string;
         added_at: string;
         auto_registered: number | null;
+        model: string | null;
       }
     | undefined;
   if (!row) return undefined;
@@ -495,6 +510,7 @@ export function getRegisteredGroup(
     tag: row.trigger_pattern,
     added_at: row.added_at,
     autoRegistered: row.auto_registered === 1,
+    model: row.model || undefined,
   };
 }
 
@@ -503,8 +519,8 @@ export function setRegisteredGroup(
   group: RegisteredGroup,
 ): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, auto_registered)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, auto_registered, model)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     chatId,
     group.name,
@@ -512,6 +528,7 @@ export function setRegisteredGroup(
     group.tag,
     group.added_at,
     group.autoRegistered ? 1 : 0,
+    group.model || null,
   );
 }
 
@@ -525,6 +542,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     trigger_pattern: string;
     added_at: string;
     auto_registered: number | null;
+    model: string | null;
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -534,6 +552,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       tag: row.trigger_pattern,
       added_at: row.added_at,
       autoRegistered: row.auto_registered === 1,
+      model: row.model || undefined,
     };
   }
   return result;
@@ -629,6 +648,34 @@ export function getTaskRunStats(
 export function pruneActivityLog(keepDays = 7): void {
   const cutoff = new Date(Date.now() - keepDays * 86400000).toISOString();
   db.prepare('DELETE FROM activity_log WHERE timestamp < ?').run(cutoff);
+}
+
+// --- Digest queue ---
+
+export interface DigestItem {
+  id: number;
+  chat_id: string;
+  group_folder: string;
+  text: string;
+  created_at: string;
+}
+
+export function queueDigestMessage(chatId: string, groupFolder: string, text: string): void {
+  db.prepare(
+    `INSERT INTO digest_queue (chat_id, group_folder, text, created_at) VALUES (?, ?, ?, ?)`,
+  ).run(chatId, groupFolder, text, new Date().toISOString());
+}
+
+export function getAndClearDigestQueue(): DigestItem[] {
+  const items = db
+    .prepare('SELECT * FROM digest_queue ORDER BY created_at')
+    .all() as DigestItem[];
+
+  if (items.length > 0) {
+    db.prepare('DELETE FROM digest_queue').run();
+  }
+
+  return items;
 }
 
 // --- JSON migration ---

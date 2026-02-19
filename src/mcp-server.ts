@@ -3,6 +3,7 @@
  * Runs as a child process of OpenCode, communicates via stdio.
  * Reads context from environment variables, writes IPC files for the host orchestrator.
  */
+import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -11,7 +12,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const DATA_DIR = path.resolve(process.cwd(), '..', '..', 'data');
+const PROJECT_ROOT = path.resolve(process.cwd(), '..', '..');
+const DATA_DIR = path.join(PROJECT_ROOT, 'data');
+const SCRIPTS_DIR = path.join(PROJECT_ROOT, 'scripts');
 const chatId = process.env.NANOCLAW_CHAT_ID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
@@ -43,22 +46,38 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user immediately while you're still running. Use this for progress updates or to send multiple messages. Note: when running as a scheduled task, your final output is NOT sent to the user — use this tool if you need to communicate.",
+  `Send a message to the user. Priority controls delivery:
+- "notify": Immediate email — use for approvals needed, alerts, errors, direct answers to user questions
+- "digest": Batched into a periodic digest email (default) — use for status updates, routine reports, scheduled task summaries
+- "log": Stored in activity log only, no email — use for "nothing new" check-ins, internal notes
+
+When running as a scheduled task, your final output is NOT sent to the user automatically. Use this tool with the appropriate priority.`,
   {
     text: z.string().describe('The message text to send'),
+    priority: z
+      .enum(['notify', 'digest', 'log'])
+      .default('digest')
+      .describe('Delivery priority: notify (immediate email), digest (batched), log (no email)'),
   },
   async (args) => {
     const data = {
       type: 'message',
       chatId,
       text: args.text,
+      priority: args.priority || 'digest',
       groupFolder,
       timestamp: new Date().toISOString(),
     };
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+    const label =
+      args.priority === 'notify'
+        ? 'Message sent (immediate email).'
+        : args.priority === 'log'
+          ? 'Message logged (no email).'
+          : 'Message queued for digest.';
+    return { content: [{ type: 'text' as const, text: label }] };
   },
 );
 
@@ -275,6 +294,76 @@ server.tool(
       timestamp: new Date().toISOString(),
     });
     return { content: [{ type: 'text' as const, text: `Task ${args.task_id} cancellation requested.` }] };
+  },
+);
+
+const SUPPORTED_PLATFORMS = ['twitter', 'linkedin', 'reddit'] as const;
+
+server.tool(
+  'post_to_social',
+  `Post content to a social media platform using macOS browser automation (AppleScript).
+
+IMPORTANT: Only use this AFTER the user has explicitly approved a draft. Never post without approval.
+
+Requirements:
+- Twitter/X: User must be logged in via their default browser. Requires macOS Accessibility permission.
+- LinkedIn: User must be logged in via Safari. Requires Safari > Develop > Allow JavaScript from Apple Events.
+- Reddit: User must be logged in via their default browser. Requires the "url" parameter with the Reddit post URL.
+
+The tool opens the platform in the browser, pastes the content, and submits the post.`,
+  {
+    platform: z.enum(SUPPORTED_PLATFORMS).describe('Target platform: "twitter", "linkedin", or "reddit"'),
+    text: z.string().describe('The post content text'),
+    url: z.string().optional().describe('Target URL — required for reddit comments (the post URL to comment on)'),
+  },
+  async (args) => {
+    if (args.platform === 'reddit' && !args.url) {
+      return {
+        content: [{ type: 'text' as const, text: 'Reddit comments require the "url" parameter with the post URL.' }],
+        isError: true,
+      };
+    }
+
+    const scriptFile = `post-${args.platform}.applescript`;
+    const scriptPath = path.join(SCRIPTS_DIR, scriptFile);
+
+    if (!fs.existsSync(scriptPath)) {
+      return {
+        content: [{ type: 'text' as const, text: `No posting script found for platform "${args.platform}".` }],
+        isError: true,
+      };
+    }
+
+    try {
+      const scriptArgs = [scriptPath, args.text];
+      if (args.url) scriptArgs.push(args.url);
+
+      const result = await new Promise<string>((resolve, reject) => {
+        execFile('osascript', scriptArgs, { timeout: 45000 }, (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(stderr || error.message));
+            return;
+          }
+          resolve(stdout.trim());
+        });
+      });
+
+      if (result.startsWith('ERROR:')) {
+        return {
+          content: [{ type: 'text' as const, text: result }],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: 'text' as const, text: `Posted to ${args.platform}: ${result}` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Failed to post to ${args.platform}: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
   },
 );
 

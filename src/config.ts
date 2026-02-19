@@ -71,6 +71,12 @@ export const MAX_TRIGGERS_PER_HOUR = parseInt(
   10,
 );
 
+// Digest email interval (how often to send batched digest)
+export const DIGEST_INTERVAL_MS = parseInt(
+  process.env.DIGEST_INTERVAL_MS || String(2 * 60 * 60 * 1000),
+  10,
+);
+
 // Heartbeat and monitoring
 export const HEARTBEAT_EMAIL_ENABLED =
   (process.env.HEARTBEAT_EMAIL || '').toLowerCase() === 'true';
