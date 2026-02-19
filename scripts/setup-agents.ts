@@ -16,12 +16,13 @@ initDatabase();
 // --- Register Groups ---
 
 const groups = [
-  { chatId: 'email:tag:research', name: 'Research', folder: 'research', tag: 'research' },
-  { chatId: 'email:tag:growth', name: 'Growth', folder: 'growth', tag: 'growth' },
-  { chatId: 'email:tag:content', name: 'Content', folder: 'content', tag: 'content' },
-  { chatId: 'email:tag:ops', name: 'Ops', folder: 'ops', tag: 'ops' },
-  { chatId: 'email:tag:product', name: 'Product', folder: 'product', tag: 'product' },
-  { chatId: 'email:tag:community', name: 'Community', folder: 'community', tag: 'community' },
+  { chatId: 'email:tag:research', name: 'Research', folder: 'research', tag: 'research', model: 'ollama/qwen3-coder:30b' },
+  { chatId: 'email:tag:growth', name: 'Growth', folder: 'growth', tag: 'growth', model: 'ollama/qwen3:8b' },
+  { chatId: 'email:tag:content', name: 'Content', folder: 'content', tag: 'content', model: 'ollama/glm-4.7-flash' },
+  { chatId: 'email:tag:ops', name: 'Ops', folder: 'ops', tag: 'ops', model: 'ollama/gemma3:4b' },
+  { chatId: 'email:tag:product', name: 'Product', folder: 'product', tag: 'product', model: 'ollama/llama3.1:8b' },
+  { chatId: 'email:tag:community', name: 'Community', folder: 'community', tag: 'community', model: 'ollama/gemma3:4b' },
+  { chatId: 'email:tag:social', name: 'Social', folder: 'social', tag: 'social', model: 'ollama/qwen3:8b' },
 ];
 
 for (const g of groups) {
@@ -30,6 +31,7 @@ for (const g of groups) {
     folder: g.folder,
     tag: g.tag,
     added_at: new Date().toISOString(),
+    model: g.model,
   });
   console.log(`Registered group: [${g.tag}] ${g.name} → ${g.folder}/`);
 }
@@ -47,15 +49,17 @@ function nextInterval(ms: number): string {
 const existingIds = new Set(getAllTasks().map((t) => t.id));
 
 const tasks = [
-  // --- Research (Nova) ---
+  // =============================================
+  // Research (Nova) — continuous scan every 20 min + weekly deep dive
+  // =============================================
   {
-    id: 'task-research-daily-scan',
+    id: 'task-research-continuous-scan',
     group_folder: 'research',
     chat_id: 'email:tag:research',
     prompt:
-      'Daily trend scan: Search the web for startup ecosystem news from the last 24 hours — new accelerators, founder tools, funding trends, competitor studios. Save findings to research/daily/ with today\'s date as filename. If anything is directly relevant to Launch80\'s positioning as a startup studio, use trigger_email to send it to [content] with a suggested content angle. Send a brief summary of the top 3 findings to admin via send_message.',
-    schedule_type: 'cron' as const,
-    schedule_value: '30 8 * * *',
+      'Continuous trend scan: Review research/daily/ for your most recent findings and only report NET NEW items — skip anything you have already logged. Search the web for startup ecosystem news — new accelerators, founder tools, funding trends, competitor studios. Append only new findings to research/daily/ (use today\'s date as filename, append to existing file if present). If anything is directly relevant to Launch80\'s positioning as a startup studio and you haven\'t already flagged it, use trigger_email to send it to [content] with a suggested content angle. Only send_message to admin if you found something genuinely new and noteworthy.',
+    schedule_type: 'interval' as const,
+    schedule_value: '1200000',
     context_mode: 'group' as const,
   },
   {
@@ -69,16 +73,18 @@ const tasks = [
     context_mode: 'group' as const,
   },
 
-  // --- Growth (Ledger) ---
+  // =============================================
+  // Growth (Ledger) — continuous scan every 20 min + weekly report
+  // =============================================
   {
-    id: 'task-growth-funding-scan',
+    id: 'task-growth-continuous-scan',
     group_folder: 'growth',
     chat_id: 'email:tag:growth',
     prompt:
-      'Funding landscape scan: Search the web for recent startup funding news — angel investment rounds, pre-seed/seed deals, new fund announcements, changing deal terms. Append key data points to growth/funding-landscape.md with today\'s date. Only alert admin via send_message if there\'s a major shift (new fund >$50M, regulatory changes, major trend reversal).',
+      'Continuous funding scan: Review growth/funding-landscape.md for your most recent entries and only report NET NEW data — skip anything already logged. Search the web for recent startup funding news — angel investment rounds, pre-seed/seed deals, new fund announcements, changing deal terms. Append only new data points to growth/funding-landscape.md with timestamps. Only alert admin via send_message if there is a genuinely new major shift (new fund >$50M, regulatory changes, major trend reversal) that you have not previously reported.',
     schedule_type: 'interval' as const,
-    schedule_value: '21600000',
-    context_mode: 'isolated' as const,
+    schedule_value: '1200000',
+    context_mode: 'group' as const,
   },
   {
     id: 'task-growth-weekly-report',
@@ -91,19 +97,43 @@ const tasks = [
     context_mode: 'group' as const,
   },
 
-  // --- Content (Echo) ---
+  // =============================================
+  // Content (Echo) — continuous review every 45 min + daily summary
+  // =============================================
   {
-    id: 'task-content-daily-review',
+    id: 'task-content-continuous-review',
     group_folder: 'content',
     chat_id: 'email:tag:content',
     prompt:
-      'Daily content review: Check content/inbox/ for any ideas dropped by other agents. Also review content/calendar.md for what\'s scheduled. Draft 1-2 social media posts (Twitter/X and LinkedIn) about Launch80 or startup advice to content/drafts/ with today\'s date. Update content/calendar.md. Send the drafts to admin via send_message for approval. Remember: you NEVER post directly — always draft for human review.',
+      'Continuous content review: Check content/inbox/ for any NEW ideas dropped by other agents since your last check. Review content/calendar.md for upcoming items. If there are new ideas worth drafting, create 1-2 social media posts (Twitter/X and LinkedIn) about Launch80 or startup advice to content/drafts/ with today\'s date. Update content/calendar.md. Send new drafts to admin via send_message for approval. If no new ideas since last check, skip silently — do not send a message. Remember: you NEVER post directly — always draft for human review.',
+    schedule_type: 'interval' as const,
+    schedule_value: '2700000',
+    context_mode: 'group' as const,
+  },
+  {
+    id: 'task-content-daily-summary',
+    group_folder: 'content',
+    chat_id: 'email:tag:content',
+    prompt:
+      'Daily content summary: Review all content/drafts/ from today. Compile a summary of what was drafted, what\'s pending approval, and what\'s scheduled for this week in content/calendar.md. Send a concise end-of-day content status to admin via send_message.',
     schedule_type: 'cron' as const,
-    schedule_value: '0 10 * * *',
+    schedule_value: '0 18 * * *',
     context_mode: 'group' as const,
   },
 
-  // --- Ops (Sentinel) ---
+  // =============================================
+  // Ops (Sentinel) — continuous health every 15 min + daily digest
+  // =============================================
+  {
+    id: 'task-ops-continuous-health',
+    group_folder: 'ops',
+    chat_id: 'email:tag:ops',
+    prompt:
+      'Continuous health check: Use get_system_status to check NanoClaw health. Use list_tasks to verify all scheduled tasks are running (no stale tasks). If everything is fine, log silently — do NOT send a message. Only alert admin via send_message if something is wrong (IMAP disconnected, tasks failing, agents timing out, unusual patterns). Review the last few task run results for errors.',
+    schedule_type: 'interval' as const,
+    schedule_value: '900000',
+    context_mode: 'isolated' as const,
+  },
   {
     id: 'task-ops-daily-digest',
     group_folder: 'ops',
@@ -114,18 +144,10 @@ const tasks = [
     schedule_value: '0 8 * * *',
     context_mode: 'isolated' as const,
   },
-  {
-    id: 'task-ops-health-check',
-    group_folder: 'ops',
-    chat_id: 'email:tag:ops',
-    prompt:
-      'System health check: Use get_system_status to check NanoClaw health. Use list_tasks to verify all scheduled tasks are running (no stale tasks). If everything is fine, log silently — do NOT send a message. Only alert admin via send_message if something is wrong (IMAP disconnected, tasks failing, agents timing out).',
-    schedule_type: 'interval' as const,
-    schedule_value: '14400000',
-    context_mode: 'isolated' as const,
-  },
 
-  // --- Product (Atlas) ---
+  // =============================================
+  // Product (Atlas) — daily standup + weekly review (unchanged)
+  // =============================================
   {
     id: 'task-product-daily-standup',
     group_folder: 'product',
@@ -147,15 +169,17 @@ const tasks = [
     context_mode: 'group' as const,
   },
 
-  // --- Community (Harbor) ---
+  // =============================================
+  // Community (Harbor) — continuous pulse every 60 min + weekly spotlight
+  // =============================================
   {
-    id: 'task-community-daily-pulse',
+    id: 'task-community-continuous-pulse',
     group_folder: 'community',
     chat_id: 'email:tag:community',
     prompt:
-      'Daily community pulse: Think about what would spark meaningful discussion in the Launch80 Discord today. Consider what stage most founders are at, common challenges, recent startup news. Draft a discussion prompt or founder tip to community/daily-prompts/ with today\'s date. Send it to admin via send_message for posting in Discord.',
-    schedule_type: 'cron' as const,
-    schedule_value: '30 9 * * *',
+      'Continuous community pulse: Review community/daily-prompts/ for what you have already posted today. If you have already done 2 or more prompts today, skip silently. Otherwise, think about what would spark meaningful discussion in the Launch80 Discord right now. Consider current startup news, common founder challenges, trending topics. Draft a discussion prompt or founder tip to community/daily-prompts/ with today\'s date and a sequence number. Send it to admin via send_message for posting in Discord.',
+    schedule_type: 'interval' as const,
+    schedule_value: '3600000',
     context_mode: 'group' as const,
   },
   {
@@ -166,6 +190,30 @@ const tasks = [
       'Weekly founder spotlight: Draft a "founder spotlight" template or success story angle that celebrates founders in the Launch80 community. Think about common founder challenges and triumphs. Save to community/spotlights/ with this week\'s date. Use trigger_email to [content] with a social media angle. Send the draft to admin via send_message.',
     schedule_type: 'cron' as const,
     schedule_value: '0 15 * * 3',
+    context_mode: 'group' as const,
+  },
+
+  // =============================================
+  // Social (SocialSpark) — continuous scan every 20 min + weekly strategy
+  // =============================================
+  {
+    id: 'task-social-continuous-scan',
+    group_folder: 'social',
+    chat_id: 'email:tag:social',
+    prompt:
+      'Continuous social & SEO scan: Review social/daily/ for your most recent findings and only report NET NEW trends — skip anything already logged. Search the web for trending topics in the startup/founder space across Reddit, X, and Instagram. Identify new viral patterns — what hooks are working, which formats are getting reach, what hashtags are trending. Check for algorithm updates or platform changes. Append only new findings to social/daily/ (use today\'s date as filename, append if exists). If you find genuinely new content ideas not already sent, use trigger_email to send the top items to [content] Echo with specific SEO angles, suggested hooks, optimal posting times, and hashtag strategies. Only send_message to admin if there is a noteworthy new trend.',
+    schedule_type: 'interval' as const,
+    schedule_value: '1200000',
+    context_mode: 'group' as const,
+  },
+  {
+    id: 'task-social-weekly-strategy',
+    group_folder: 'social',
+    chat_id: 'email:tag:social',
+    prompt:
+      'Weekly growth strategy report: Review your social/daily/ files from this week. Compile what trending topics and viral patterns you found, platform algorithm updates, and competitor social media moves. Write a strategic growth plan for next week to social/reports/ with this week\'s date — include specific post ideas with hooks, SEO keywords, suggested formats (carousel, thread, reel), and optimal posting times for each platform. Update social/seo-keywords.md with any new target keywords. Send the full report to admin via send_message.',
+    schedule_type: 'cron' as const,
+    schedule_value: '0 16 * * 5',
     context_mode: 'group' as const,
   },
 ];

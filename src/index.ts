@@ -18,6 +18,8 @@ import {
   getNewMessages,
   getRouterState,
   initDatabase,
+  logActivity,
+  pruneActivityLog,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -31,6 +33,12 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { startMonitor } from './monitor.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import {
+  registerAgent,
+  unregisterAgent,
+  addAgentEvent,
+  getActiveAgents,
+} from './agent-tracker.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -40,7 +48,6 @@ let messageLoopRunning = false;
 
 let emailChannel: EmailChannel;
 const queue = new GroupQueue();
-const activeAgents: Record<string, { chatId: string; startedAt: number }> = {};
 const startupTime = Date.now();
 
 function loadState(): void {
@@ -138,7 +145,20 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
     0,
   );
 
-  activeAgents[group.folder] = { chatId, startedAt: Date.now() };
+  const agentStartedAt = Date.now();
+  registerAgent(group.folder, {
+    chatId,
+    groupFolder: group.folder,
+    startedAt: agentStartedAt,
+    prompt: prompt.slice(0, 200),
+    model: group.model,
+  });
+  logActivity({
+    event_type: 'agent_started',
+    group_folder: group.folder,
+    summary: `Agent [${group.tag}] processing ${missedMessages.length} message(s)`,
+    details: { messageCount: missedMessages.length, promptPreview: prompt.slice(0, 200) },
+  });
   try {
     const output = await runOpenCodeAgent({
       groupFolder: group.folder,
@@ -147,6 +167,8 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
       prompt,
       sessionId,
       triggerDepth: maxTriggerDepth,
+      model: group.model,
+      onEvent: (event) => addAgentEvent(group.folder, { time: Date.now(), ...event }),
     });
 
     if (output.sessionId) {
@@ -159,11 +181,19 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
         { group: group.name, error: output.error },
         'Agent error',
       );
+      logActivity({
+        event_type: 'agent_error',
+        group_folder: group.folder,
+        summary: `Agent [${group.tag}] error: ${(output.error || 'unknown').slice(0, 100)}`,
+        details: { error: output.error },
+      });
       // Roll back cursor for retry
       lastAgentTimestamp[chatId] = previousCursor;
       saveState();
       return false;
     }
+
+    const durationMs = Date.now() - agentStartedAt;
 
     // Send result to user via email
     if (output.result) {
@@ -173,14 +203,27 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
       }
     }
 
+    logActivity({
+      event_type: 'agent_completed',
+      group_folder: group.folder,
+      summary: `Agent [${group.tag}] completed in ${(durationMs / 1000).toFixed(1)}s`,
+      details: { durationMs, resultPreview: output.result?.slice(0, 300) },
+    });
+
     return true;
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
+    logActivity({
+      event_type: 'agent_error',
+      group_folder: group.folder,
+      summary: `Agent [${group.tag}] exception: ${err instanceof Error ? err.message.slice(0, 100) : 'unknown'}`,
+      details: { error: err instanceof Error ? err.message : String(err) },
+    });
     lastAgentTimestamp[chatId] = previousCursor;
     saveState();
     return false;
   } finally {
-    delete activeAgents[group.folder];
+    unregisterAgent(group.folder);
   }
 }
 
@@ -302,7 +345,7 @@ async function main(): Promise<void> {
       imap_connected: emailChannel.isConnected(),
       registered_groups: Object.keys(registeredGroups).length,
       active_tasks: getAllTasks().filter((t) => t.status === 'active').length,
-      active_agents: Object.keys(activeAgents).length,
+      active_agents: Object.keys(getActiveAgents()).length,
     };
     fs.mkdirSync(path.dirname(heartbeatFile), { recursive: true });
     fs.writeFileSync(heartbeatFile, JSON.stringify(heartbeat, null, 2));
@@ -310,8 +353,11 @@ async function main(): Promise<void> {
   writeHeartbeat();
   setInterval(writeHeartbeat, 5 * 60 * 1000);
 
+  // Prune activity log daily (keep 7 days)
+  setInterval(() => pruneActivityLog(7), 24 * 60 * 60 * 1000);
+
   // Start status dashboard
-  startMonitor({ activeAgents: () => activeAgents });
+  startMonitor({ activeAgents: getActiveAgents });
 
   startMessageLoop();
 }

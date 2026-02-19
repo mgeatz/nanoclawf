@@ -5,6 +5,11 @@ import path from 'path';
 import { AGENT_TIMEOUT, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
 
+export interface AgentEvent {
+  type: string;
+  text: string;
+}
+
 export interface AgentInput {
   groupFolder: string;
   chatId: string;
@@ -12,6 +17,8 @@ export interface AgentInput {
   prompt: string;
   sessionId?: string;
   triggerDepth?: number;
+  model?: string;
+  onEvent?: (event: AgentEvent) => void;
 }
 
 export interface AgentOutput {
@@ -30,6 +37,10 @@ export async function runOpenCodeAgent(opts: AgentInput): Promise<AgentOutput> {
   fs.mkdirSync(logsDir, { recursive: true });
 
   const args: string[] = ['run', '--format', 'json'];
+
+  if (opts.model) {
+    args.push('--model', opts.model);
+  }
 
   if (opts.sessionId) {
     args.push('--session', opts.sessionId, '--continue');
@@ -65,9 +76,30 @@ export async function runOpenCodeAgent(opts: AgentInput): Promise<AgentOutput> {
 
     let stdout = '';
     let stderr = '';
+    let stdoutBuffer = '';
 
     proc.stdout.on('data', (data) => {
-      stdout += data.toString();
+      const chunk = data.toString();
+      stdout += chunk;
+
+      // Stream parsed events to callback
+      if (opts.onEvent) {
+        stdoutBuffer += chunk;
+        const lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop() || ''; // keep incomplete last line
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const event = JSON.parse(trimmed);
+            const parsed = parseEventForDisplay(event);
+            if (parsed) opts.onEvent(parsed);
+          } catch {
+            // Non-JSON line
+            opts.onEvent({ type: 'output', text: trimmed });
+          }
+        }
+      }
     });
 
     proc.stderr.on('data', (data) => {
@@ -218,4 +250,51 @@ function parseOpenCodeOutput(stdout: string): AgentOutput {
 
   const result = textParts.join('').trim() || null;
   return { status: 'success', result, sessionId };
+}
+
+/**
+ * Parse an OpenCode NDJSON event into a display-friendly summary.
+ */
+function parseEventForDisplay(event: Record<string, unknown>): AgentEvent | null {
+  const type = String(event.type || 'unknown');
+
+  // Assistant text output
+  if (type === 'text' && event.part && typeof event.part === 'object') {
+    const part = event.part as Record<string, unknown>;
+    if (part.text) return { type: 'text', text: String(part.text) };
+  }
+
+  // Tool use
+  if (type === 'tool_call' || type === 'tool_use') {
+    const name = event.name || event.tool || 'tool';
+    return { type: 'tool', text: String(name) };
+  }
+
+  // Tool result
+  if (type === 'tool_result') {
+    const name = event.name || event.tool || 'tool';
+    return { type: 'tool_result', text: String(name) };
+  }
+
+  // Thinking / reasoning
+  if (type === 'thinking' || type === 'reasoning') {
+    const part = event.part as Record<string, unknown> | undefined;
+    const text = part?.text || event.text || '';
+    if (text) return { type: 'thinking', text: String(text).slice(0, 500) };
+  }
+
+  // Session start
+  if (type === 'session.start' || type === 'session') {
+    return { type: 'status', text: 'Session started' };
+  }
+
+  // Skip noise events
+  if (type === 'ping' || type === 'heartbeat') return null;
+
+  // Generic fallback for any other event type
+  if (event.message || event.text) {
+    return { type, text: String(event.message || event.text).slice(0, 300) };
+  }
+
+  return { type: 'status', text: type };
 }

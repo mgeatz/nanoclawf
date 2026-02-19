@@ -23,6 +23,7 @@ Launch80 is a startup studio that helps aspiring founders transform their idea i
 | Sentinel | `[ops]` | Digest & health checks | Daily digest 8am, health every 4h |
 | Atlas | `[product]` | Product tracking | Daily standup 9am, Friday review 5pm |
 | Harbor | `[community]` | Community engagement | Daily pulse 9:30am, Wed spotlight 3pm |
+| SocialSpark | `[social]` | Social media SEO strategy | Daily trend scan 8am, Friday strategy 4pm |
 
 ## Delegation
 

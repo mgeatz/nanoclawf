@@ -4,6 +4,7 @@ export interface RegisteredGroup {
   tag: string;
   added_at: string;
   autoRegistered?: boolean;
+  model?: string;
 }
 
 export interface NewMessage {

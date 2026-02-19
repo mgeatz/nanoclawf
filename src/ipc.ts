@@ -11,7 +11,7 @@ import {
   TRIGGER_COOLDOWN_MS,
   TIMEZONE,
 } from './config.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { createTask, deleteTask, getTaskById, logActivity, updateTask } from './db.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
@@ -115,6 +115,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     { chatId: data.chatId, sourceGroup },
                     'IPC message sent',
                   );
+                  logActivity({
+                    event_type: 'email_sent',
+                    group_folder: sourceGroup,
+                    summary: `IPC message sent from [${sourceGroup}]`,
+                    details: { chatId: data.chatId, textPreview: data.text?.slice(0, 200) },
+                  });
                 } else {
                   logger.warn(
                     { chatId: data.chatId, sourceGroup },
@@ -381,6 +387,12 @@ export async function processTaskIpc(
           { sourceGroup, targetTag, depth },
           'Trigger email sent via IPC',
         );
+        logActivity({
+          event_type: 'trigger_email_sent',
+          group_folder: sourceGroup,
+          summary: `Trigger: [${sourceGroup}] -> [${targetTag}] "${data.subject}"`,
+          details: { sourceGroup, targetTag, subject: data.subject, depth },
+        });
       }
       break;
 

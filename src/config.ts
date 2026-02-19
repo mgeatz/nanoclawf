@@ -19,7 +19,7 @@ export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 
 export const POLL_INTERVAL = 2000;
-export const SCHEDULER_POLL_INTERVAL = 60000;
+export const SCHEDULER_POLL_INTERVAL = 30000;
 
 const PROJECT_ROOT = process.cwd();
 
@@ -52,7 +52,7 @@ export const AGENT_TIMEOUT = parseInt(
 );
 export const MAX_CONCURRENT_AGENTS = Math.max(
   1,
-  parseInt(process.env.MAX_CONCURRENT_AGENTS || '5', 10) || 5,
+  parseInt(process.env.MAX_CONCURRENT_AGENTS || '4', 10) || 4,
 );
 
 export const IPC_POLL_INTERVAL = 1000;
@@ -63,11 +63,11 @@ export const MAX_TRIGGER_DEPTH = parseInt(
   10,
 );
 export const TRIGGER_COOLDOWN_MS = parseInt(
-  process.env.TRIGGER_COOLDOWN_MS || '60000',
+  process.env.TRIGGER_COOLDOWN_MS || '30000',
   10,
 );
 export const MAX_TRIGGERS_PER_HOUR = parseInt(
-  process.env.MAX_TRIGGERS_PER_HOUR || '30',
+  process.env.MAX_TRIGGERS_PER_HOUR || '120',
   10,
 );
 

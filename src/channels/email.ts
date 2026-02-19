@@ -17,6 +17,7 @@ import {
 import {
   getEmailThread,
   getRouterState,
+  logActivity,
   setEmailThread,
   setRouterState,
 } from '../db.js';
@@ -289,6 +290,12 @@ export class EmailChannel implements Channel {
       { chatId, tag, subject, bodyLength: body.length },
       'Email received',
     );
+    logActivity({
+      event_type: 'email_received',
+      group_folder: folder,
+      summary: `Email received: [${tag}] "${subject}"`,
+      details: { chatId, tag, subject, bodyLength: body.length },
+    });
 
     this.opts.onMessage(chatId, message);
   }
@@ -323,6 +330,12 @@ export class EmailChannel implements Channel {
     try {
       await this.smtp.sendMail(mailOptions);
       logger.info({ chatId, to: NOTIFICATION_EMAIL }, 'Agent response sent via email');
+      logActivity({
+        event_type: 'email_sent',
+        group_folder: tag,
+        summary: `Email sent: [${tag}] Agent Response -> ${NOTIFICATION_EMAIL}`,
+        details: { chatId, to: NOTIFICATION_EMAIL, subject: mailOptions.subject, textPreview: text.slice(0, 200) },
+      });
     } catch (err) {
       logger.error({ chatId, err }, 'Failed to send email');
     }
@@ -340,6 +353,11 @@ export class EmailChannel implements Channel {
         },
       });
       logger.info({ subject, triggerDepth }, 'Self-trigger email sent');
+      logActivity({
+        event_type: 'trigger_email_sent',
+        summary: `Self-trigger email: "${subject}" (depth: ${triggerDepth + 1})`,
+        details: { subject, triggerDepth: triggerDepth + 1, bodyPreview: body.slice(0, 200) },
+      });
     } catch (err) {
       logger.error({ subject, err }, 'Failed to send self-trigger email');
     }
