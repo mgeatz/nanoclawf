@@ -2,18 +2,23 @@
  * Localhost status dashboard for NanoClaw.
  * Serves a self-contained HTML page on MONITOR_PORT.
  */
+import { execSync } from 'child_process';
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, MONITOR_PORT, GROUPS_DIR, TIMEZONE } from './config.js';
+import { AGENT_TIMEOUT, DATA_DIR, MONITOR_PORT, GROUPS_DIR, TIMEZONE } from './config.js';
 import {
+  computeCollaborationScore,
   getAllChats,
   getAllRegisteredGroups,
   getAllTasks,
   getActivityLog,
+  getAdminActivity,
+  getCollaborationMetrics,
+  getCollaborationTrend,
   getTaskById,
   getTaskRunStats,
   logActivity,
@@ -21,10 +26,25 @@ import {
 } from './db.js';
 import { getTriggerCountThisHour } from './ipc.js';
 import { logger } from './logger.js';
-import { getActiveAgents, getAgentEvents, getAgentTokensPerSec } from './agent-tracker.js';
+import {
+  getActiveAgents,
+  getAgentEvents,
+  getAgentTokensPerSec,
+} from './agent-tracker.js';
 
 export interface MonitorState {
-  activeAgents: () => Record<string, { chatId: string; startedAt: number; taskId?: string; prompt: string; model?: string; tokenCount: number }>;
+  activeAgents: () => Record<
+    string,
+    {
+      chatId: string;
+      startedAt: number;
+      taskId?: string;
+      prompt: string;
+      model?: string;
+      tokenCount: number;
+      pid: number | null;
+    }
+  >;
 }
 
 const startTime = Date.now();
@@ -43,8 +63,16 @@ export function startMonitor(state: MonitorState): void {
       const limit = parseInt(urlObj.searchParams.get('limit') || '50', 10);
       const offset = parseInt(urlObj.searchParams.get('offset') || '0', 10);
       const eventType = urlObj.searchParams.get('type') || undefined;
+      const since = urlObj.searchParams.get('since') || undefined;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(getActivityLog(limit, offset, eventType)));
+      res.end(JSON.stringify(getActivityLog(limit, offset, eventType, since)));
+      return;
+    }
+
+    // Process stats endpoint
+    if (req.url === '/api/process-stats') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getProcessStats(state)));
       return;
     }
 
@@ -77,7 +105,10 @@ export function startMonitor(state: MonitorState): void {
         res.end(JSON.stringify({ error: 'Task not found' }));
         return;
       }
-      updateTask(taskId, { next_run: new Date().toISOString(), status: 'active' });
+      updateTask(taskId, {
+        next_run: new Date().toISOString(),
+        status: 'active',
+      });
       logActivity({
         event_type: 'task_manual_trigger',
         group_folder: task.group_folder,
@@ -123,7 +154,10 @@ export function startMonitor(state: MonitorState): void {
         res.end(JSON.stringify({ error: 'Task not found' }));
         return;
       }
-      updateTask(taskId, { status: 'active', next_run: new Date().toISOString() });
+      updateTask(taskId, {
+        status: 'active',
+        next_run: new Date().toISOString(),
+      });
       logActivity({
         event_type: 'task_manual_trigger',
         group_folder: task.group_folder,
@@ -147,25 +181,39 @@ export function startMonitor(state: MonitorState): void {
         return;
       }
       let body = '';
-      req.on('data', (chunk) => { body += chunk; });
+      req.on('data', (chunk) => {
+        body += chunk;
+      });
       req.on('end', () => {
         try {
           const { scheduleType, scheduleValue } = JSON.parse(body);
           if (!scheduleType || !scheduleValue) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'scheduleType and scheduleValue required' }));
+            res.end(
+              JSON.stringify({
+                error: 'scheduleType and scheduleValue required',
+              }),
+            );
             return;
           }
           if (!['cron', 'interval', 'once'].includes(scheduleType)) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'scheduleType must be cron, interval, or once' }));
+            res.end(
+              JSON.stringify({
+                error: 'scheduleType must be cron, interval, or once',
+              }),
+            );
             return;
           }
           // Compute next_run from the new schedule
           let nextRun = '';
           if (scheduleType === 'cron') {
             try {
-              nextRun = CronExpressionParser.parse(scheduleValue, { tz: TIMEZONE }).next().toISOString() as string;
+              nextRun = CronExpressionParser.parse(scheduleValue, {
+                tz: TIMEZONE,
+              })
+                .next()
+                .toISOString() as string;
             } catch {
               res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Invalid cron expression' }));
@@ -175,7 +223,11 @@ export function startMonitor(state: MonitorState): void {
             const ms = parseInt(scheduleValue, 10);
             if (isNaN(ms) || ms <= 0) {
               res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Invalid interval (must be positive ms)' }));
+              res.end(
+                JSON.stringify({
+                  error: 'Invalid interval (must be positive ms)',
+                }),
+              );
               return;
             }
             nextRun = new Date(Date.now() + ms).toISOString();
@@ -183,7 +235,9 @@ export function startMonitor(state: MonitorState): void {
             const d = new Date(scheduleValue);
             if (isNaN(d.getTime())) {
               res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Invalid date for once schedule' }));
+              res.end(
+                JSON.stringify({ error: 'Invalid date for once schedule' }),
+              );
               return;
             }
             nextRun = d.toISOString();
@@ -199,9 +253,20 @@ export function startMonitor(state: MonitorState): void {
             summary: `Task "${taskId}" schedule updated: ${scheduleType} ${scheduleValue}`,
             task_id: taskId,
           });
-          logger.info({ taskId, scheduleType, scheduleValue, nextRun }, 'Task schedule updated from dashboard');
+          logger.info(
+            { taskId, scheduleType, scheduleValue, nextRun },
+            'Task schedule updated from dashboard',
+          );
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, taskId, scheduleType, scheduleValue, nextRun }));
+          res.end(
+            JSON.stringify({
+              ok: true,
+              taskId,
+              scheduleType,
+              scheduleValue,
+              nextRun,
+            }),
+          );
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid JSON body' }));
@@ -232,7 +297,9 @@ function getStatus(state: MonitorState) {
     if (fs.existsSync(heartbeatFile)) {
       heartbeat = JSON.parse(fs.readFileSync(heartbeatFile, 'utf-8'));
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   // Groups
   const groups = getAllRegisteredGroups();
@@ -259,8 +326,13 @@ function getStatus(state: MonitorState) {
       nextRun: t.next_run,
       lastRun: t.last_run,
       lastResult: t.last_result?.slice(0, 150) || null,
-      avgDurationMs: stats.avg_duration_ms ? Math.round(stats.avg_duration_ms) : null,
-      successRate: stats.total > 0 ? Math.round((stats.successes / stats.total) * 100) : null,
+      avgDurationMs: stats.avg_duration_ms
+        ? Math.round(stats.avg_duration_ms)
+        : null,
+      successRate:
+        stats.total > 0
+          ? Math.round((stats.successes / stats.total) * 100)
+          : null,
       totalRuns: stats.total,
     };
   });
@@ -284,12 +356,97 @@ function getStatus(state: MonitorState) {
       taskId: info.taskId || null,
       prompt: info.prompt || '',
       model: info.model || null,
+      pid: info.pid || null,
       eventCount: getAgentEvents(group).length,
       tokensPerSec: getAgentTokensPerSec(group),
       tokenCount: info.tokenCount || 0,
     })),
     triggersThisHour: getTriggerCountThisHour(),
+    agentTimeout: AGENT_TIMEOUT,
+    collaboration: (() => {
+      const metrics24h = getCollaborationMetrics(24);
+      const metrics7d = getCollaborationMetrics(168);
+      const trend = getCollaborationTrend();
+      return {
+        score: computeCollaborationScore(metrics24h),
+        trend:
+          trend.current > trend.previous
+            ? 'up'
+            : trend.current < trend.previous
+              ? 'down'
+              : 'stable',
+        triggers24h: metrics24h.totalTriggers,
+        triggers7d: metrics7d.totalTriggers,
+        uniquePairs: metrics24h.uniquePairs,
+        byAgent: metrics24h.byAgent,
+        topPairs: metrics24h.pairs.slice(0, 5),
+      };
+    })(),
+    adminActivity: getAdminActivity(30),
+    metrics: (() => {
+      const completions = getActivityLog(1000, 0, 'agent_completed');
+      const errors = getActivityLog(1000, 0, 'agent_error');
+      const triggers = getActivityLog(1000, 0, 'trigger_email_sent');
+      const emails = getActivityLog(1000, 0, 'email_sent');
+      const timeouts = errors.filter((e) =>
+        e.summary?.includes('timed out') || e.details_json?.includes('timed out'),
+      );
+      const durations = completions
+        .map((e) => {
+          try {
+            const d = JSON.parse(e.details_json || '{}');
+            return d.durationMs;
+          } catch { return null; }
+        })
+        .filter((d): d is number => d !== null && d > 0);
+      return {
+        avgCompletionMs: durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null,
+        completionCount: completions.length,
+        timeoutCount: timeouts.length,
+        triggerSuccessCount: triggers.length,
+        emailsSent: emails.length,
+        activeGroups: groupList.length,
+        activeTasks: tasks.filter((t) => t.status === 'active').length,
+      };
+    })(),
   };
+}
+
+function getProcessStats(state: MonitorState) {
+  const agents = state.activeAgents();
+  const agentStats: { group: string; pid: number; cpu: string; rss_mb: string }[] = [];
+
+  // Get stats for each agent with a PID
+  for (const [group, info] of Object.entries(agents)) {
+    if (info.pid) {
+      try {
+        const out = execSync(`ps -p ${info.pid} -o pcpu=,rss= 2>/dev/null`, { timeout: 2000 }).toString().trim();
+        const [cpu, rss] = out.split(/\s+/);
+        agentStats.push({
+          group,
+          pid: info.pid,
+          cpu: cpu || '0',
+          rss_mb: rss ? (parseInt(rss, 10) / 1024).toFixed(0) : '0',
+        });
+      } catch { /* process may have exited */ }
+    }
+  }
+
+  // Get Ollama runner stats
+  let ollama: { pid: number; cpu: string; rss_mb: string } | null = null;
+  try {
+    const out = execSync("ps aux | grep 'ollama runner' | grep -v grep | head -1", { timeout: 2000 }).toString().trim();
+    if (out) {
+      const parts = out.split(/\s+/);
+      ollama = {
+        pid: parseInt(parts[1], 10),
+        cpu: parts[2] || '0',
+        rss_mb: parts[5] ? (parseInt(parts[5], 10) / 1024).toFixed(0) : '0',
+      };
+    }
+  } catch { /* no ollama runner */ }
+
+  return { agents: agentStats, ollama };
 }
 
 const HTML_PAGE = `<!DOCTYPE html>
@@ -301,10 +458,11 @@ const HTML_PAGE = `<!DOCTYPE html>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #0a0a0a; color: #c8c8c8; font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 13px; padding: 20px; }
   h1 { color: #e0e0e0; font-size: 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
-  h2 { color: #a0a0a0; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 6px; border-bottom: 1px solid #222; padding-bottom: 4px; }
-  .status-bar { display: flex; gap: 20px; padding: 8px 12px; background: #111; border-radius: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+  h2 { color: #a0a0a0; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin: 0; border: none; padding: 0; }
+  .status-bar { display: flex; gap: 16px; padding: 8px 12px; background: #111; border-radius: 4px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
   .status-item { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .status-val { color: #e0e0e0; }
+  .status-sep { color: #222; font-size: 10px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
   .green { background: #2d8; }
   .red { background: #d44; }
@@ -312,8 +470,10 @@ const HTML_PAGE = `<!DOCTYPE html>
   .refresh { color: #444; font-size: 11px; }
   .btn-help { background: #1a1a1a; color: #888; border: 1px solid #333; border-radius: 50%; width: 22px; height: 22px; cursor: pointer; font-size: 12px; font-family: inherit; display: flex; align-items: center; justify-content: center; }
   .btn-help:hover { color: #e0e0e0; border-color: #666; }
-  .main-grid { display: grid; grid-template-columns: 1fr 280px; gap: 16px; margin-bottom: 16px; }
-  @media (max-width: 900px) { .main-grid { grid-template-columns: 1fr; } }
+  .main-grid { display: grid; grid-template-columns: 240px 1fr 280px; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 1100px) { .main-grid { grid-template-columns: 1fr 280px; } .collab-panel { grid-column: 1 / -1; } }
+  @media (max-width: 700px) { .main-grid { grid-template-columns: 1fr; } }
+  .collab-panel { min-width: 0; }
   .side-panel > div { margin-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; color: #555; font-weight: normal; padding: 3px 6px; font-size: 11px; }
@@ -342,7 +502,7 @@ const HTML_PAGE = `<!DOCTYPE html>
   .activity-summary { flex: 1; min-width: 150px; color: #bbb; }
   .activity-group { color: #8af; font-size: 11px; }
   .activity-time { color: #444; font-size: 11px; flex-shrink: 0; }
-  .activity-details { width: 100%; background: #0a0a0a; border: 1px solid #1a1a1a; border-radius: 3px; padding: 8px 10px; margin-top: 4px; font-size: 11px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #888; }
+  .activity-details { width: 100%; background: #0a0a0a; border: 1px solid #1a1a1a; border-radius: 3px; padding: 8px 10px; margin-top: 4px; font-size: 11px; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #888; }
   .icon-started { color: #da2; }
   .icon-completed { color: #2d8; }
   .icon-error { color: #d44; }
@@ -387,12 +547,22 @@ const HTML_PAGE = `<!DOCTYPE html>
   .agent-card .agent-time { color: #2d8; font-size: 11px; }
   .agent-card .agent-task { color: #666; font-size: 10px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .agent-card .agent-events { color: #555; font-size: 10px; margin-top: 2px; }
-  .agent-output { background: #0a0a0a; border: 1px solid #1a1a1a; border-radius: 4px; max-height: 400px; overflow-y: auto; margin-bottom: 12px; display: none; }
-  .agent-output.open { display: block; }
-  .agent-output-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-bottom: 1px solid #1a1a1a; position: sticky; top: 0; background: #0e0e0e; }
-  .agent-output-header span { color: #8af; font-size: 12px; font-weight: bold; }
-  .agent-output-close { background: none; border: none; color: #666; cursor: pointer; font-size: 14px; padding: 0 4px; }
-  .agent-output-close:hover { color: #e0e0e0; }
+  .collab-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+  .collab-score { font-size: 28px; font-weight: bold; line-height: 1; }
+  .collab-high { color: #2d8; }
+  .collab-mid { color: #da2; }
+  .collab-low { color: #d44; }
+  .collab-trend { font-size: 14px; }
+  .trend-up { color: #2d8; }
+  .trend-down { color: #d44; }
+  .trend-stable { color: #555; }
+  .collab-stats { color: #666; font-size: 11px; margin-bottom: 6px; }
+  .collab-pair { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; color: #888; }
+  .collab-pair-route { color: #a8f; }
+  .collab-pair-count { color: #e0e0e0; font-weight: bold; }
+  .collab-agents { margin-top: 6px; }
+  .collab-agents td { padding: 1px 6px; font-size: 11px; border: none; }
+  .admin-ops { max-height: 350px; overflow-y: auto; border: 1px solid #1a1a1a; border-radius: 4px; background: #0c0c0c; }
   .event-line { padding: 2px 10px; font-size: 11px; border-bottom: 1px solid #111; display: flex; gap: 6px; }
   .event-line .ev-type { color: #666; width: 50px; flex-shrink: 0; text-align: right; }
   .event-line .ev-text { color: #bbb; word-break: break-word; white-space: pre-wrap; }
@@ -403,6 +573,26 @@ const HTML_PAGE = `<!DOCTYPE html>
   .event-line.ev-status-type .ev-text { color: #555; }
   .event-line.ev-tool_result-type .ev-type { color: #68c; }
   .toast { position: fixed; bottom: 20px; right: 20px; background: #1a3a2a; color: #2d8; padding: 8px 16px; border-radius: 4px; font-size: 12px; display: none; z-index: 200; }
+  /* Accordion */
+  .accordion { border: 1px solid #222; border-radius: 4px; margin-bottom: 12px; }
+  .accordion-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; cursor: pointer; background: #111; border-radius: 4px; user-select: none; }
+  .accordion-header h2 { margin: 0; border: none; padding: 0; }
+  .accordion-chevron { color: #555; font-size: 10px; transition: transform 0.2s; }
+  .accordion.collapsed .accordion-chevron { transform: rotate(-90deg); }
+  .accordion.collapsed .accordion-body { display: none; }
+  .accordion-body { padding: 8px; }
+  /* Live output */
+  .output-tabs { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; }
+  .output-tab { background: #111; border: 1px solid #222; color: #666; padding: 2px 10px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 11px; }
+  .output-tab.active { background: #1a1a2a; color: #8af; border-color: #8af; }
+  .live-output-feed { max-height: 400px; overflow-y: auto; background: #0a0a0a; border: 1px solid #1a1a1a; border-radius: 4px; min-height: 60px; }
+  /* Metrics table */
+  .metrics-table { width: 100%; }
+  .metrics-table td { padding: 4px 10px; font-size: 12px; }
+  .metrics-table td:first-child { color: #888; }
+  .metrics-table .metric-before { color: #d44; text-align: center; }
+  .metrics-table .metric-after { color: #2d8; text-align: center; font-weight: bold; }
+  .metrics-table th { padding: 4px 10px; }
 </style>
 </head>
 <body>
@@ -412,30 +602,80 @@ const HTML_PAGE = `<!DOCTYPE html>
   <button class="btn-help" onclick="toggleHelp()" title="Help">?</button>
 </div>
 <div class="status-bar" id="status-bar"></div>
-<div class="agent-output" id="agent-output"></div>
 <div class="main-grid">
+  <div class="collab-panel">
+    <div class="accordion" id="acc-collab">
+      <div class="accordion-header" onclick="toggleAccordion('acc-collab')">
+        <h2>Collaboration</h2><span class="accordion-chevron">&#9660;</span>
+      </div>
+      <div class="accordion-body">
+        <div id="collab"><div class="empty">Loading...</div></div>
+      </div>
+    </div>
+  </div>
   <div>
-    <h2>Activity Feed</h2>
-    <div class="filter-bar" id="filter-bar"></div>
-    <div class="activity-feed" id="activity-feed"><div class="empty">Loading...</div></div>
+    <div class="accordion" id="acc-activity">
+      <div class="accordion-header" onclick="toggleAccordion('acc-activity')">
+        <h2>Activity Feed</h2><span class="accordion-chevron">&#9660;</span>
+      </div>
+      <div class="accordion-body">
+        <div class="filter-bar" id="filter-bar"></div>
+        <div class="filter-bar" id="time-filter-bar"></div>
+        <div class="activity-feed" id="activity-feed"><div class="empty">Loading...</div></div>
+      </div>
+    </div>
   </div>
   <div class="side-panel">
-    <div>
-      <h2>Active Agents</h2>
-      <div id="agents"></div>
+    <div class="accordion" id="acc-agents">
+      <div class="accordion-header" onclick="toggleAccordion('acc-agents')">
+        <h2>Active Agents</h2><span class="accordion-chevron">&#9660;</span>
+      </div>
+      <div class="accordion-body"><div id="agents"></div></div>
     </div>
-    <div>
-      <h2>Groups</h2>
-      <div id="groups"></div>
+    <div class="accordion" id="acc-groups">
+      <div class="accordion-header" onclick="toggleAccordion('acc-groups')">
+        <h2>Groups</h2><span class="accordion-chevron">&#9660;</span>
+      </div>
+      <div class="accordion-body"><div id="groups"></div></div>
     </div>
-    <div>
-      <h2>Recent Chats</h2>
-      <div id="chats"></div>
+    <div class="accordion" id="acc-chats">
+      <div class="accordion-header" onclick="toggleAccordion('acc-chats')">
+        <h2>Recent Chats</h2><span class="accordion-chevron">&#9660;</span>
+      </div>
+      <div class="accordion-body"><div id="chats"></div></div>
     </div>
   </div>
 </div>
-<h2>Scheduled Tasks</h2>
-<div id="tasks" style="overflow-x:auto"></div>
+<div class="accordion" id="acc-live-output">
+  <div class="accordion-header" onclick="toggleAccordion('acc-live-output')">
+    <h2>Agent Live Output</h2><span class="accordion-chevron">&#9660;</span>
+  </div>
+  <div class="accordion-body">
+    <div class="output-tabs" id="output-tabs"></div>
+    <div class="live-output-feed" id="live-output-feed"><div class="empty">No agents running</div></div>
+  </div>
+</div>
+<div class="accordion" id="acc-admin">
+  <div class="accordion-header" onclick="toggleAccordion('acc-admin')">
+    <h2>Admin Operations</h2><span class="accordion-chevron">&#9660;</span>
+  </div>
+  <div class="accordion-body">
+    <div class="filter-bar" id="admin-time-filter-bar"></div>
+    <div id="admin-ops" class="admin-ops"><div class="empty">Loading...</div></div>
+  </div>
+</div>
+<div class="accordion" id="acc-tasks">
+  <div class="accordion-header" onclick="toggleAccordion('acc-tasks')">
+    <h2>Scheduled Tasks</h2><span class="accordion-chevron">&#9660;</span>
+  </div>
+  <div class="accordion-body"><div id="tasks" style="overflow-x:auto"></div></div>
+</div>
+<div class="accordion" id="acc-metrics">
+  <div class="accordion-header" onclick="toggleAccordion('acc-metrics')">
+    <h2>System Metrics</h2><span class="accordion-chevron">&#9660;</span>
+  </div>
+  <div class="accordion-body"><div id="metrics-content"><div class="empty">Loading...</div></div></div>
+</div>
 <div class="toast" id="toast"></div>
 <div class="modal-overlay" id="help-modal" onclick="if(event.target===this)toggleHelp()">
   <div class="modal">
@@ -454,15 +694,21 @@ const HTML_PAGE = `<!DOCTYPE html>
     <p>All recurring and one-time tasks. Shows success rate, average duration, and total runs. Click <strong>Run Now</strong> to trigger immediately — the activity feed will show it being picked up.</p>
     <h4>Agent Roster</h4>
     <ul>
-      <li><code>[admin]</code> — Overseer, delegates work, approves content</li>
-      <li><code>[research]</code> Nova — Startup ecosystem intelligence</li>
-      <li><code>[growth]</code> Ledger — Funding landscape and metrics</li>
-      <li><code>[content]</code> Echo — Brand and content marketing</li>
-      <li><code>[ops]</code> Sentinel — Operations, daily digest, health checks</li>
-      <li><code>[product]</code> Atlas — DIY Portal, platform features, backlog</li>
-      <li><code>[community]</code> Harbor — Discord community, founder relations</li>
-      <li><code>[social]</code> SocialSpark — Social media SEO, viral strategies, platform trends</li>
+      <li><code>[admin]</code> — Gatekeeper &amp; team leader, routes all agent-to-user comms, provides direction</li>
+      <li><code>[research]</code> Nova — Startup ecosystem intelligence, web search, daily reports</li>
+      <li><code>[content]</code> Echo — Brand and content marketing, tweet drafts, Twitter replies</li>
+      <li><code>[social]</code> SocialSpark — Social media SEO, Reddit engagement, trend scanning</li>
     </ul>
+    <h4>Collaboration KPI</h4>
+    <p>Measures how actively agents collaborate with each other via trigger emails. The score (0-100) is based on:</p>
+    <ul>
+      <li><strong>Diversity (40pts)</strong> — How many unique agent pairs are interacting</li>
+      <li><strong>Volume (30pts)</strong> — Number of triggers in the last 24 hours (20+ = full marks)</li>
+      <li><strong>Participation (30pts)</strong> — How many of the 7 agents sent at least one trigger</li>
+    </ul>
+    <p>Score ranges: <strong style="color:#2d8">70+</strong> = strong collaboration, <strong style="color:#da2">40-69</strong> = developing, <strong style="color:#d44">&lt;40</strong> = siloed. The trend arrow compares the last 24h to the previous 24h.</p>
+    <h4>Admin Operations</h4>
+    <p>Timeline of all actions taken by the admin agent — approvals routed to agents, feedback sent, direction given, orchestration summaries, and emails to the user. Click any row to expand details.</p>
   </div>
 </div>
 <div class="modal-overlay" id="edit-modal" onclick="if(event.target===this)closeEditModal()">
@@ -531,6 +777,49 @@ var activityData = [];
 var editingTaskId = null;
 var viewingAgent = null;
 var agentOutputTimer = null;
+var expandedAdminId = null;
+var activityTimeframe = 'all';
+var adminTimeframe = 'all';
+
+// Accordion with localStorage persistence
+function toggleAccordion(id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.classList.toggle('collapsed');
+  var state = JSON.parse(localStorage.getItem('ncAccordions') || '{}');
+  state[id] = el.classList.contains('collapsed');
+  localStorage.setItem('ncAccordions', JSON.stringify(state));
+}
+(function restoreAccordions() {
+  var saved = JSON.parse(localStorage.getItem('ncAccordions') || '{}');
+  Object.keys(saved).forEach(function(id) {
+    if (saved[id]) {
+      var el = document.getElementById(id);
+      if (el) el.classList.add('collapsed');
+    }
+  });
+})();
+
+// Timeframe helpers
+var tfHours = { '1h': 1, '6h': 6, '24h': 24, '7d': 168 };
+function getTimeframeSince(tf) {
+  if (tf === 'all') return '';
+  return new Date(Date.now() - tfHours[tf] * 3600000).toISOString();
+}
+function renderTimeFilter(containerId, currentTf, onChange) {
+  var tfs = ['1h','6h','24h','7d','all'];
+  document.getElementById(containerId).innerHTML = tfs.map(function(tf) {
+    return '<button class="filter-btn' + (tf === currentTf ? ' active' : '') + '" data-tf="' + tf + '">' + tf + '</button>';
+  }).join('');
+  document.getElementById(containerId).addEventListener('click', function(e) {
+    var btn = e.target.closest('.filter-btn');
+    if (!btn) return;
+    onChange(btn.dataset.tf);
+    this.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.toggle('active', b.dataset.tf === btn.dataset.tf); });
+  });
+}
+renderTimeFilter('time-filter-bar', activityTimeframe, function(tf) { activityTimeframe = tf; refreshActivity(); });
+renderTimeFilter('admin-time-filter-bar', adminTimeframe, function(tf) { adminTimeframe = tf; refreshAll(); });
 
 var DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 function humanSchedule(type, value) {
@@ -729,40 +1018,60 @@ function renderActivity() {
 }
 function rateClass(r) { return r >= 90 ? 'rate-good' : r >= 70 ? 'rate-warn' : 'rate-bad'; }
 
-function openAgentOutput(group) {
+// Live output section (replaces old popup)
+function selectLiveAgent(group) {
   viewingAgent = group;
-  refreshAgentOutput();
-  document.getElementById('agent-output').classList.add('open');
+  document.querySelectorAll('.output-tab').forEach(function(t) { t.classList.toggle('active', t.dataset.group === group); });
+  document.querySelectorAll('.agent-card').forEach(function(c) { c.classList.toggle('viewing', c.dataset.agent === group); });
+  refreshLiveOutput();
   if (agentOutputTimer) clearInterval(agentOutputTimer);
-  agentOutputTimer = setInterval(refreshAgentOutput, 2000);
+  agentOutputTimer = setInterval(refreshLiveOutput, 2000);
+  var acc = document.getElementById('acc-live-output');
+  if (acc && acc.classList.contains('collapsed')) toggleAccordion('acc-live-output');
+  acc.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
-function closeAgentOutput() {
+function stopLiveOutput() {
   viewingAgent = null;
-  document.getElementById('agent-output').classList.remove('open');
   if (agentOutputTimer) { clearInterval(agentOutputTimer); agentOutputTimer = null; }
+  document.querySelectorAll('.agent-card').forEach(function(c) { c.classList.remove('viewing'); });
 }
-function refreshAgentOutput() {
+function refreshLiveOutput() {
   if (!viewingAgent) return;
   fetch('/api/agent-output/' + encodeURIComponent(viewingAgent))
     .then(function(r){ return r.json(); })
     .then(function(events) {
-      var el = document.getElementById('agent-output');
+      var el = document.getElementById('live-output-feed');
       var wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-      var html = '<div class="agent-output-header"><span>[' + esc(viewingAgent) + '] Live Output (' + events.length + ' events)</span><button class="agent-output-close" data-close-agent="1">&times;</button></div>';
       if (!events.length) {
-        html += '<div class="empty" style="padding:12px">Waiting for output...</div>';
+        el.innerHTML = '<div class="empty" style="padding:12px">Waiting for output...</div>';
       } else {
-        html += events.map(function(ev) {
+        el.innerHTML = events.map(function(ev) {
           var cls = 'ev-' + ev.type + '-type';
           var label = ev.type;
           if (ev.type === 'tool_result') label = 'result';
           return '<div class="event-line ' + cls + '"><span class="ev-type">' + esc(label) + '</span><span class="ev-text">' + esc(ev.text) + '</span></div>';
         }).join('');
       }
-      el.innerHTML = html;
       if (wasAtBottom) el.scrollTop = el.scrollHeight;
     })
     .catch(function(){});
+}
+
+// Render system metrics before/after table
+function renderMetrics(m) {
+  if (!m) return;
+  var avgStr = m.avgCompletionMs ? (m.avgCompletionMs / 1000).toFixed(0) + 's' : '-';
+  document.getElementById('metrics-content').innerHTML =
+    '<table class="metrics-table">' +
+    '<tr><th>Metric</th><th>Before</th><th>Current</th></tr>' +
+    '<tr><td>Avg completion time</td><td class="metric-before">10 min (timeout)</td><td class="metric-after">' + avgStr + '</td></tr>' +
+    '<tr><td>Agent completions</td><td class="metric-before">0</td><td class="metric-after">' + m.completionCount + '</td></tr>' +
+    '<tr><td>Timeouts</td><td class="metric-before">All</td><td class="metric-after">' + m.timeoutCount + '</td></tr>' +
+    '<tr><td>Triggers sent</td><td class="metric-before">0 (blocked)</td><td class="metric-after">' + m.triggerSuccessCount + '</td></tr>' +
+    '<tr><td>Emails sent</td><td class="metric-before">0</td><td class="metric-after">' + m.emailsSent + '</td></tr>' +
+    '<tr><td>Active groups</td><td class="metric-before">8</td><td class="metric-after">' + m.activeGroups + '</td></tr>' +
+    '<tr><td>Scheduled tasks</td><td class="metric-before">18</td><td class="metric-after">' + m.activeTasks + '</td></tr>' +
+    '</table>';
 }
 
 document.addEventListener('click', function(e) {
@@ -778,10 +1087,10 @@ document.addEventListener('click', function(e) {
       .catch(function(err){ showToast('Error: ' + err.message); });
     return;
   }
-  var closeAgent = e.target.closest('[data-close-agent]');
-  if (closeAgent) { closeAgentOutput(); return; }
   var agentCard = e.target.closest('.agent-card[data-agent]');
-  if (agentCard) { openAgentOutput(agentCard.dataset.agent); return; }
+  if (agentCard) { selectLiveAgent(agentCard.dataset.agent); return; }
+  var outputTab = e.target.closest('.output-tab[data-group]');
+  if (outputTab) { selectLiveAgent(outputTab.dataset.group); return; }
   var editBtn = e.target.closest('.btn[data-edit]');
   if (editBtn) {
     openEditModal(editBtn.dataset.edit, editBtn.dataset.stype, editBtn.dataset.sval, editBtn.dataset.prompt);
@@ -813,9 +1122,15 @@ document.addEventListener('click', function(e) {
   }
   var row = e.target.closest('.activity-row');
   if (row) {
-    var rid = parseInt(row.dataset.id, 10);
-    expandedId = expandedId === rid ? null : rid;
-    renderActivity();
+    if (row.dataset.adminId) {
+      var aid = parseInt(row.dataset.adminId, 10);
+      expandedAdminId = expandedAdminId === aid ? null : aid;
+      refreshAll();
+    } else if (row.dataset.id) {
+      var rid = parseInt(row.dataset.id, 10);
+      expandedId = expandedId === rid ? null : rid;
+      renderActivity();
+    }
   }
 });
 
@@ -827,7 +1142,7 @@ document.getElementById('filter-bar').addEventListener('click', function(e) {
   var btn = e.target.closest('.filter-btn');
   if (!btn) return;
   activityFilter = btn.dataset.filter;
-  document.querySelectorAll('.filter-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.filter === activityFilter); });
+  document.querySelectorAll('#filter-bar .filter-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.filter === activityFilter); });
   renderActivity();
 });
 
@@ -835,18 +1150,44 @@ document.getElementById('edit-sched-type').addEventListener('change', function()
 document.getElementById('edit-sched-value').addEventListener('input', updateEditPreview);
 document.getElementById('edit-save-btn').addEventListener('click', saveSchedule);
 
+// Fetch activity with timeframe
+async function refreshActivity() {
+  try {
+    var since = getTimeframeSince(activityTimeframe);
+    var url = '/api/activity?limit=100' + (since ? '&since=' + encodeURIComponent(since) : '');
+    var ar = await fetch(url);
+    activityData = await ar.json();
+    renderActivity();
+  } catch(e) {}
+}
+
 async function refreshAll() {
   try {
-    var sr = await fetch('/api/status');
+    var [sr, psr] = await Promise.all([
+      fetch('/api/status'),
+      fetch('/api/process-stats').catch(function() { return { json: function() { return { agents: [], ollama: null }; } }; })
+    ]);
     var d = await sr.json();
+    var ps = await psr.json();
     var hb = d.heartbeat;
-    document.getElementById('status-bar').innerHTML = [
+
+    // Status bar with process stats
+    var statusItems = [
       '<div class="status-item"><span class="dot '+(hb && hb.imap_connected ? 'green' : 'red')+'"></span>IMAP</div>',
       '<div class="status-item">Up: <span class="status-val">'+fmt(d.uptime_ms)+'</span></div>',
       '<div class="status-item">Groups: <span class="status-val">'+d.groups.length+'</span></div>',
       '<div class="status-item">Tasks: <span class="status-val">'+d.tasks.length+'</span></div>',
       '<div class="status-item">Triggers/hr: <span class="status-val">'+d.triggersThisHour+'</span></div>',
-    ].join('');
+      '<div class="status-item">Timeout: <span class="status-val">'+fmt(d.agentTimeout)+'</span></div>',
+    ];
+    if (ps.ollama) {
+      statusItems.push('<div class="status-sep">|</div>');
+      statusItems.push('<div class="status-item">Ollama: <span class="status-val">' + esc(ps.ollama.cpu) + '% CPU, ' + esc(ps.ollama.rss_mb) + 'MB</span></div>');
+    }
+    ps.agents.forEach(function(a) {
+      statusItems.push('<div class="status-item">[' + esc(a.group) + ']: <span class="status-val">' + esc(a.cpu) + '% CPU, ' + esc(a.rss_mb) + 'MB</span></div>');
+    });
+    document.getElementById('status-bar').innerHTML = statusItems.join('');
     document.getElementById('groups').innerHTML = table(
       ['Tag', 'Model'],
       d.groups.map(function(g){ return ['['+esc(g.tag)+']', '<span style="color:#666;font-size:10px">'+ esc((g.model||'default').replace(/^ollama\\//, '')) +'</span>'] })
@@ -862,9 +1203,17 @@ async function refreshAll() {
           '<div class="agent-events"><span style="color:#2d8">' + tps + '</span> <span style="color:#555">|</span> ' + a.tokenCount + ' tokens <span style="color:#555">|</span> ' + a.eventCount + ' events</div>' +
         '</div>';
       }).join('');
+      // Update output tabs
+      document.getElementById('output-tabs').innerHTML = d.activeAgents.map(function(a) {
+        return '<button class="output-tab' + (viewingAgent === a.group ? ' active' : '') + '" data-group="' + esc(a.group) + '">[' + esc(a.group) + ']</button>';
+      }).join('');
     } else {
       document.getElementById('agents').innerHTML = '<div class="empty">Idle</div>';
-      if (viewingAgent) closeAgentOutput();
+      document.getElementById('output-tabs').innerHTML = '';
+      if (viewingAgent) {
+        stopLiveOutput();
+        document.getElementById('live-output-feed').innerHTML = '<div class="empty">No agents running</div>';
+      }
     }
     document.getElementById('tasks').innerHTML = table(
       ['ID', 'Group', 'Schedule', 'Status', 'Last Run', 'Avg', 'Rate', 'Runs', ''],
@@ -896,15 +1245,89 @@ async function refreshAll() {
       ['Chat', 'Last'],
       d.chats.map(function(c){ return [esc(c.name), timeAgo(c.last_message_time)] })
     );
+
+    // Collaboration KPI
+    var c = d.collaboration;
+    if (c) {
+      var scoreClass = c.score >= 70 ? 'collab-high' : c.score >= 40 ? 'collab-mid' : 'collab-low';
+      var trendIcon = c.trend === 'up' ? '&#9650;' : c.trend === 'down' ? '&#9660;' : '&#9654;';
+      var trendClass = c.trend === 'up' ? 'trend-up' : c.trend === 'down' ? 'trend-down' : 'trend-stable';
+      var html = '<div class="collab-header">' +
+        '<span class="collab-score ' + scoreClass + '">' + c.score + '</span>' +
+        '<span class="collab-trend ' + trendClass + '">' + trendIcon + ' ' + c.trend + '</span>' +
+      '</div>' +
+      '<div class="collab-stats">24h: ' + c.triggers24h + ' triggers, ' + c.uniquePairs + ' pairs &middot; 7d: ' + c.triggers7d + ' triggers</div>';
+
+      if (c.topPairs && c.topPairs.length > 0) {
+        html += '<div style="margin-top:4px">';
+        c.topPairs.forEach(function(p) {
+          html += '<div class="collab-pair"><span class="collab-pair-route">' + esc(p.source) + ' &#8594; ' + esc(p.target) + '</span><span class="collab-pair-count">' + p.count + '</span></div>';
+        });
+        html += '</div>';
+      }
+
+      var agents = Object.keys(c.byAgent || {});
+      if (agents.length > 0) {
+        html += '<table class="collab-agents"><tr><th style="color:#555;font-size:10px">Agent</th><th style="color:#555;font-size:10px">Sent</th><th style="color:#555;font-size:10px">Recv</th></tr>';
+        agents.sort().forEach(function(a) {
+          var s = c.byAgent[a];
+          html += '<tr><td style="color:#8af">' + esc(a) + '</td><td style="color:#2d8">' + s.sent + '</td><td>' + s.received + '</td></tr>';
+        });
+        html += '</table>';
+      }
+
+      if (c.triggers24h === 0) {
+        html = '<div class="collab-header"><span class="collab-score collab-low">0</span><span class="collab-trend trend-stable">&#9654; no data</span></div>' +
+          '<div class="collab-stats">No inter-agent collaboration yet</div>';
+      }
+      document.getElementById('collab').innerHTML = html;
+    }
+
+    // Admin Operations (with timeframe filtering)
+    if (d.adminActivity && d.adminActivity.length > 0) {
+      var adminSince = getTimeframeSince(adminTimeframe);
+      var adminFiltered = adminSince
+        ? d.adminActivity.filter(function(a) { return a.timestamp > adminSince; })
+        : d.adminActivity;
+      if (adminFiltered.length > 0) {
+        var ahtml = '';
+        adminFiltered.forEach(function(a) {
+          var expanded = expandedAdminId === a.id;
+          var details = '';
+          if (expanded && a.details_json) {
+            try {
+              var dp = JSON.parse(a.details_json);
+              var lines = Object.keys(dp).map(function(k) {
+                var v = dp[k];
+                if (v === null || v === undefined) return '';
+                return k + ': ' + String(v).slice(0, 500);
+              }).filter(function(x){return x});
+              details = '<div class="activity-details">' + esc(lines.join('\\n')) + '</div>';
+            } catch(ex) {}
+          }
+          ahtml += '<div class="activity-row" data-admin-id="' + a.id + '">' +
+            getIcon(a.event_type) +
+            '<span class="activity-summary">' + esc(a.summary) + '</span>' +
+            '<span class="activity-time">' + timeAgo(a.timestamp) + '</span>' +
+            details +
+          '</div>';
+        });
+        document.getElementById('admin-ops').innerHTML = ahtml;
+      } else {
+        document.getElementById('admin-ops').innerHTML = '<div class="empty">No admin activity in this timeframe</div>';
+      }
+    } else {
+      document.getElementById('admin-ops').innerHTML = '<div class="empty">No admin activity yet</div>';
+    }
+
+    // System metrics
+    renderMetrics(d.metrics);
+
     document.getElementById('refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('refresh').textContent = 'error: ' + e.message;
   }
-  try {
-    var ar = await fetch('/api/activity?limit=50');
-    activityData = await ar.json();
-    renderActivity();
-  } catch(e) {}
+  await refreshActivity();
 }
 refreshAll();
 setInterval(refreshAll, 5000);

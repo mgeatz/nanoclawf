@@ -21,7 +21,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { runOpenCodeAgent } from './opencode-client.js';
-import { registerAgent, unregisterAgent, addAgentEvent } from './agent-tracker.js';
+import { registerAgent, unregisterAgent, addAgentEvent, setAgentPid } from './agent-tracker.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 export interface SchedulerDependencies {
@@ -161,7 +161,13 @@ async function runTask(
       prompt: task.prompt,
       sessionId,
       model: groupModel,
-      onEvent: (event) => addAgentEvent(task.group_folder, { time: Date.now(), ...event }),
+      onEvent: (event) => {
+        if (event.type === 'pid' && event.text) {
+          setAgentPid(task.group_folder, parseInt(event.text, 10));
+          return;
+        }
+        addAgentEvent(task.group_folder, { time: Date.now(), ...event });
+      },
     });
 
     if (output.status === 'error') {
@@ -169,6 +175,25 @@ async function runTask(
     } else if (output.result) {
       result = output.result;
       // Task output is NOT auto-emailed. Agents use send_message with priority.
+    }
+
+    // Output validation: flag tasks that "succeeded" but contain error indicators
+    if (!error && result) {
+      const degradedPattern =
+        /\berror\b|\bfailed\b|\bnot found\b|\bdoesn't exist\b|\btimeout\b|\bincomplete\b|\b403\b|\b404\b|\bcorrupted\b|\bbroken\b/i;
+      if (degradedPattern.test(result)) {
+        logActivity({
+          event_type: 'task_degraded',
+          group_folder: task.group_folder,
+          summary: `Task "${task.id}" completed but output contains error indicators`,
+          details: { resultPreview: result.slice(0, 300) },
+          task_id: task.id,
+        });
+        logger.warn(
+          { taskId: task.id },
+          'Task completed but output looks degraded',
+        );
+      }
     }
 
     logger.info(

@@ -1,0 +1,1 @@
+tell application "Twitter" to make new tweet with properties {text:"Coordinate with Spark and Echo to make a post on X. Publish it. This is pre-approval. Let me know when it’s done. If you can’t get them to publish it, let me know why."}

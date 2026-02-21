@@ -9,6 +9,7 @@ interface QueuedTask {
 
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
+const MAX_PENDING_TASKS = 2;
 
 interface GroupState {
   active: boolean;
@@ -76,6 +77,14 @@ export class GroupQueue {
 
     if (state.pendingTasks.some((t) => t.id === taskId)) {
       logger.debug({ chatId, taskId }, 'Task already queued, skipping');
+      return false;
+    }
+
+    if (state.pendingTasks.length >= MAX_PENDING_TASKS) {
+      logger.warn(
+        { chatId, taskId, pending: state.pendingTasks.length },
+        'Task queue full for group, skipping',
+      );
       return false;
     }
 

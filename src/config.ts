@@ -13,6 +13,16 @@ const envConfig = readEnvFile([
   'NOTIFICATION_EMAIL',
   'MAIN_TAG',
   'OPENCODE_MODEL',
+  'AGENT_TIMEOUT',
+  'MAX_CONCURRENT_AGENTS',
+  'EMAIL_POLL_INTERVAL',
+  'MAX_TRIGGER_DEPTH',
+  'TRIGGER_COOLDOWN_MS',
+  'MAX_TRIGGERS_PER_HOUR',
+  'DIGEST_INTERVAL_MS',
+  'HEARTBEAT_EMAIL',
+  'HEARTBEAT_INTERVAL',
+  'MONITOR_PORT',
 ]);
 
 export const ASSISTANT_NAME =
@@ -37,7 +47,7 @@ export const EMAIL_ADDRESS = process.env.EMAIL_ADDRESS || envConfig.EMAIL_ADDRES
 export const EMAIL_PASSWORD = process.env.EMAIL_PASSWORD || envConfig.EMAIL_PASSWORD || '';
 export const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL || envConfig.NOTIFICATION_EMAIL || '';
 export const EMAIL_POLL_INTERVAL = parseInt(
-  process.env.EMAIL_POLL_INTERVAL || '10000',
+  process.env.EMAIL_POLL_INTERVAL || envConfig.EMAIL_POLL_INTERVAL || '10000',
   10,
 );
 
@@ -47,45 +57,45 @@ export const MAIN_TAG = (process.env.MAIN_TAG || envConfig.MAIN_TAG || 'ADMIN').
 // OpenCode configuration
 export const OPENCODE_MODEL = process.env.OPENCODE_MODEL || envConfig.OPENCODE_MODEL || 'ollama/qwen2.5-coder:32b';
 export const AGENT_TIMEOUT = parseInt(
-  process.env.AGENT_TIMEOUT || '1800000',
+  process.env.AGENT_TIMEOUT || envConfig.AGENT_TIMEOUT || '600000',
   10,
 );
 export const MAX_CONCURRENT_AGENTS = Math.max(
   1,
-  parseInt(process.env.MAX_CONCURRENT_AGENTS || '4', 10) || 4,
+  parseInt(process.env.MAX_CONCURRENT_AGENTS || envConfig.MAX_CONCURRENT_AGENTS || '4', 10) || 4,
 );
 
 export const IPC_POLL_INTERVAL = 1000;
 
 // Trigger email rate limiting
 export const MAX_TRIGGER_DEPTH = parseInt(
-  process.env.MAX_TRIGGER_DEPTH || '3',
+  process.env.MAX_TRIGGER_DEPTH || envConfig.MAX_TRIGGER_DEPTH || '3',
   10,
 );
 export const TRIGGER_COOLDOWN_MS = parseInt(
-  process.env.TRIGGER_COOLDOWN_MS || '30000',
+  process.env.TRIGGER_COOLDOWN_MS || envConfig.TRIGGER_COOLDOWN_MS || '30000',
   10,
 );
 export const MAX_TRIGGERS_PER_HOUR = parseInt(
-  process.env.MAX_TRIGGERS_PER_HOUR || '120',
+  process.env.MAX_TRIGGERS_PER_HOUR || envConfig.MAX_TRIGGERS_PER_HOUR || '120',
   10,
 );
 
 // Digest email interval (how often to send batched digest)
 export const DIGEST_INTERVAL_MS = parseInt(
-  process.env.DIGEST_INTERVAL_MS || String(2 * 60 * 60 * 1000),
+  process.env.DIGEST_INTERVAL_MS || envConfig.DIGEST_INTERVAL_MS || String(2 * 60 * 60 * 1000),
   10,
 );
 
 // Heartbeat and monitoring
 export const HEARTBEAT_EMAIL_ENABLED =
-  (process.env.HEARTBEAT_EMAIL || '').toLowerCase() === 'true';
+  (process.env.HEARTBEAT_EMAIL || envConfig.HEARTBEAT_EMAIL || '').toLowerCase() === 'true';
 export const HEARTBEAT_INTERVAL_MS = parseInt(
-  process.env.HEARTBEAT_INTERVAL || String(6 * 60 * 60 * 1000),
+  process.env.HEARTBEAT_INTERVAL || envConfig.HEARTBEAT_INTERVAL || String(6 * 60 * 60 * 1000),
   10,
 );
 export const MONITOR_PORT = parseInt(
-  process.env.MONITOR_PORT || '3700',
+  process.env.MONITOR_PORT || envConfig.MONITOR_PORT || '3700',
   10,
 );
 

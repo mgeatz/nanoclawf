@@ -22,10 +22,30 @@ on run argv
 		set frontApp to name of first application process whose frontmost is true
 	end tell
 
+	-- Map to browser name for execJS
+	set browserName to "Safari"
+	if frontApp contains "Chrome" then
+		set browserName to "Google Chrome"
+	else if frontApp contains "Arc" then
+		set browserName to "Arc"
+	else if frontApp contains "Brave" then
+		set browserName to "Brave Browser"
+	else if frontApp contains "Edge" then
+		set browserName to "Microsoft Edge"
+	end if
+
+	-- Verify we landed on Reddit
+	set urlCheckJS to "(function(){return window.location.hostname;})()"
+	set currentHost to my execJS(browserName, urlCheckJS)
+	if currentHost does not contain "reddit.com" then
+		if currentHost is not "JS_ERROR" then
+			return "ERROR: Browser navigated to " & currentHost & " instead of reddit.com. The URL may not be a valid Reddit post."
+		end if
+	end if
+
 	-- JavaScript to focus the comment box and scroll to it
 	set focusJS to "
 (function() {
-  // New Reddit (shreddit) — look for the main comment composer
   var composer = document.querySelector('shreddit-composer');
   if (composer) {
     var shadow = composer.shadowRoot;
@@ -39,12 +59,9 @@ on run argv
       }
     }
   }
-
-  // Try contenteditable div inside comment area
   var editables = document.querySelectorAll('div[contenteditable=\"true\"]');
   for (var i = 0; i < editables.length; i++) {
     var el = editables[i];
-    // Skip tiny or hidden editors
     if (el.offsetHeight > 20 && el.offsetWidth > 100) {
       el.scrollIntoView({behavior: 'smooth', block: 'center'});
       el.focus();
@@ -52,8 +69,6 @@ on run argv
       return 'FOCUSED_CONTENTEDITABLE';
     }
   }
-
-  // Try textarea fallback (old Reddit or markdown mode)
   var textareas = document.querySelectorAll('textarea');
   for (var i = 0; i < textareas.length; i++) {
     var ta = textareas[i];
@@ -65,7 +80,6 @@ on run argv
       return 'FOCUSED_TEXTAREA';
     }
   }
-
   return 'NOT_FOUND';
 })()
 "
@@ -73,14 +87,11 @@ on run argv
 	-- JavaScript to click the Comment/Submit button
 	set submitJS to "
 (function() {
-  // New Reddit — button with slot='submit-button' or type='submit'
   var submitBtn = document.querySelector('button[slot=\"submit-button\"]');
   if (submitBtn && submitBtn.offsetParent !== null) {
     submitBtn.click();
     return 'SUBMITTED';
   }
-
-  // Look for button containing 'Comment' text
   var buttons = document.querySelectorAll('button');
   for (var i = 0; i < buttons.length; i++) {
     var txt = buttons[i].textContent.trim();
@@ -89,57 +100,26 @@ on run argv
       return 'SUBMITTED';
     }
   }
-
-  // Old Reddit submit button
   var oldSubmit = document.querySelector('button[type=\"submit\"].save');
   if (oldSubmit) {
     oldSubmit.click();
     return 'SUBMITTED';
   }
-
   return 'SUBMIT_NOT_FOUND';
 })()
 "
 
-	-- Execute focus JS based on detected browser
-	set focusResult to ""
-
-	if frontApp contains "Safari" then
-		tell application "Safari"
-			set focusResult to do JavaScript focusJS in current tab of front window
+	-- Execute focus JS via execJS handler
+	set focusResult to my execJS(browserName, focusJS)
+	if focusResult is "JS_ERROR" then
+		-- Fallback: tab to comment box
+		tell application "System Events"
+			repeat 5 times
+				keystroke tab
+				delay 0.3
+			end repeat
 		end tell
-	else
-		-- Chrome, Arc, Brave, Edge all support this syntax
-		try
-			if frontApp contains "Chrome" then
-				tell application "Google Chrome"
-					set focusResult to execute front window's active tab javascript focusJS
-				end tell
-			else if frontApp contains "Arc" then
-				tell application "Arc"
-					set focusResult to execute front window's active tab javascript focusJS
-				end tell
-			else
-				-- Generic fallback: try System Events to tab to comment box
-				tell application "System Events"
-					-- Tab several times to hopefully reach comment area
-					repeat 5 times
-						keystroke tab
-						delay 0.3
-					end repeat
-				end tell
-				set focusResult to "FALLBACK_TAB"
-			end if
-		on error errMsg
-			-- If browser JS fails, try System Events
-			tell application "System Events"
-				repeat 5 times
-					keystroke tab
-					delay 0.3
-				end repeat
-			end tell
-			set focusResult to "FALLBACK_TAB"
-		end try
+		set focusResult to "FALLBACK_TAB"
 	end if
 
 	if focusResult is "NOT_FOUND" then
@@ -157,36 +137,14 @@ on run argv
 	-- Wait for text to be pasted
 	delay 2
 
-	-- Click the Comment button
-	set submitResult to ""
-
-	if frontApp contains "Safari" then
-		tell application "Safari"
-			set submitResult to do JavaScript submitJS in current tab of front window
+	-- Click the Comment button via execJS handler
+	set submitResult to my execJS(browserName, submitJS)
+	if submitResult is "JS_ERROR" then
+		-- Fallback: try Cmd+Enter
+		tell application "System Events"
+			keystroke return using command down
 		end tell
-	else
-		try
-			if frontApp contains "Chrome" then
-				tell application "Google Chrome"
-					set submitResult to execute front window's active tab javascript submitJS
-				end tell
-			else if frontApp contains "Arc" then
-				tell application "Arc"
-					set submitResult to execute front window's active tab javascript submitJS
-				end tell
-			else
-				-- Fallback: try Cmd+Enter or Tab+Enter
-				tell application "System Events"
-					keystroke return using command down
-				end tell
-				set submitResult to "FALLBACK_SUBMIT"
-			end if
-		on error errMsg
-			tell application "System Events"
-				keystroke return using command down
-			end tell
-			set submitResult to "FALLBACK_SUBMIT"
-		end try
+		set submitResult to "FALLBACK_SUBMIT"
 	end if
 
 	if submitResult is "SUBMIT_NOT_FOUND" then
@@ -194,5 +152,32 @@ on run argv
 	end if
 
 	delay 2
+	if submitResult is "FALLBACK_SUBMIT" then
+		return "UNVERIFIED: Used keyboard shortcut to submit. Could not confirm comment was posted."
+	end if
 	return "POSTED"
 end run
+
+-- Execute JavaScript in the frontmost browser
+-- Safari: direct do JavaScript (always available on macOS)
+-- Chrome/Arc/others: via osascript subprocess to avoid compile-time dictionary dependency
+on execJS(browserName, jsCode)
+	if browserName contains "Safari" then
+		tell application "Safari"
+			try
+				return do JavaScript jsCode in current tab of front window
+			on error
+				return "JS_ERROR"
+			end try
+		end tell
+	else
+		try
+			do shell script "printf '%s' " & quoted form of jsCode & " > /tmp/nc-browser-exec.js"
+			set e1 to "set js to read POSIX file \"/tmp/nc-browser-exec.js\""
+			set e2 to "tell application \"" & browserName & "\" to execute active tab of front window javascript js"
+			return do shell script "osascript -e " & quoted form of e1 & " -e " & quoted form of e2
+		on error
+			return "JS_ERROR"
+		end try
+	end if
+end execJS

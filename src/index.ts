@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
 
 import {
   ASSISTANT_NAME,
@@ -20,6 +21,7 @@ import {
   getNewMessages,
   getRouterState,
   initDatabase,
+  getActivityLog,
   logActivity,
   pruneActivityLog,
   queueDigestMessage,
@@ -40,6 +42,7 @@ import {
   registerAgent,
   unregisterAgent,
   addAgentEvent,
+  setAgentPid,
   getActiveAgents,
 } from './agent-tracker.js';
 
@@ -171,7 +174,13 @@ async function processGroupMessages(chatId: string): Promise<boolean> {
       sessionId,
       triggerDepth: maxTriggerDepth,
       model: group.model,
-      onEvent: (event) => addAgentEvent(group.folder, { time: Date.now(), ...event }),
+      onEvent: (event) => {
+        if (event.type === 'pid' && event.text) {
+          setAgentPid(group.folder, parseInt(event.text, 10));
+          return;
+        }
+        addAgentEvent(group.folder, { time: Date.now(), ...event });
+      },
     });
 
     if (output.sessionId) {
@@ -293,6 +302,91 @@ function recoverPendingMessages(): void {
   }
 }
 
+/**
+ * Smoke-test all AppleScripts at startup.
+ * Checks file size (catches "404: Not Found" corruptions) and compilation.
+ */
+async function runSmokeTests(): Promise<void> {
+  const scriptsDir = path.join(DATA_DIR, '..', 'scripts');
+  let files: string[];
+  try {
+    files = fs.readdirSync(scriptsDir).filter((f) => f.endsWith('.applescript'));
+  } catch {
+    logger.warn('Smoke test: scripts/ directory not found');
+    return;
+  }
+
+  const MIN_SIZE = 100;
+  let passed = 0;
+  let failed = 0;
+
+  for (const file of files) {
+    const filePath = path.join(scriptsDir, file);
+    const stat = fs.statSync(filePath);
+
+    if (stat.size < MIN_SIZE) {
+      logger.error(
+        { file, size: stat.size },
+        `Smoke test FAIL: ${file} is only ${stat.size} bytes (likely corrupted)`,
+      );
+      logActivity({
+        event_type: 'smoke_test_fail',
+        summary: `AppleScript ${file} corrupted (${stat.size} bytes)`,
+        details: { file, size: stat.size, reason: 'too_small' },
+      });
+      failed++;
+      continue;
+    }
+
+    // Compile-test with osacompile
+    const compileOk = await new Promise<boolean>((resolve) => {
+      execFile(
+        'osacompile',
+        ['-o', '/dev/null', filePath],
+        { timeout: 10000 },
+        (error, _stdout, stderr) => {
+          if (error) {
+            logger.error(
+              { file, stderr: stderr?.trim() },
+              `Smoke test FAIL: ${file} does not compile`,
+            );
+            logActivity({
+              event_type: 'smoke_test_fail',
+              summary: `AppleScript ${file} compile error`,
+              details: { file, error: stderr?.trim() || error.message },
+            });
+            resolve(false);
+          } else {
+            resolve(true);
+          }
+        },
+      );
+    });
+
+    if (compileOk) {
+      passed++;
+    } else {
+      failed++;
+    }
+  }
+
+  if (failed > 0) {
+    logger.warn(
+      { passed, failed, total: files.length },
+      `Smoke tests: ${failed} script(s) FAILED`,
+    );
+  } else {
+    logger.info(
+      { passed, total: files.length },
+      `Smoke tests: all ${passed} scripts OK`,
+    );
+    logActivity({
+      event_type: 'smoke_test_pass',
+      summary: `All ${passed} AppleScripts passed smoke tests`,
+    });
+  }
+}
+
 async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
@@ -340,6 +434,9 @@ async function main(): Promise<void> {
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
 
+  // Smoke-test AppleScripts (non-blocking — warn but don't prevent startup)
+  await runSmokeTests();
+
   // Start heartbeat writer (every 5 minutes)
   const heartbeatFile = path.join(DATA_DIR, 'heartbeat.json');
   const writeHeartbeat = () => {
@@ -354,6 +451,12 @@ async function main(): Promise<void> {
     };
     fs.mkdirSync(path.dirname(heartbeatFile), { recursive: true });
     fs.writeFileSync(heartbeatFile, JSON.stringify(heartbeat, null, 2));
+    // Write recent activity log for MCP tool consumption
+    const activityFile = path.join(DATA_DIR, 'activity_recent.json');
+    try {
+      const recentActivity = getActivityLog(100);
+      fs.writeFileSync(activityFile, JSON.stringify(recentActivity, null, 2));
+    } catch { /* ignore */ }
   };
   writeHeartbeat();
   setInterval(writeHeartbeat, 5 * 60 * 1000);

@@ -210,34 +210,50 @@ export class EmailChannel implements Channel {
       'Processing email',
     );
 
-    // Self-to-self filter: only process emails FROM and TO our own address
-    if (from !== myEmail || !toAddresses.includes(myEmail)) {
+    // Accept self-to-self emails OR replies from NOTIFICATION_EMAIL
+    const isSelfToSelf = from === myEmail && toAddresses.includes(myEmail);
+    const isNotificationReply = from === notifyEmail && toAddresses.includes(myEmail);
+
+    if (!isSelfToSelf && !isNotificationReply) {
       logger.debug(
-        { from, myEmail, toAddresses },
-        'Email skipped: not self-to-self',
+        { from, myEmail, notifyEmail, toAddresses },
+        'Email skipped: not from self or notification address',
       );
       return;
     }
 
-    // Ignore bot's own replies (FROM us TO notification email)
-    if (toAddresses.includes(notifyEmail)) {
+    // Ignore bot's own outbound replies (FROM us TO notification email)
+    if (from === myEmail && toAddresses.includes(notifyEmail)) {
       logger.debug('Email skipped: bot reply to notification address');
       return;
     }
 
     const subject = parsed.subject || '';
 
-    // Extract tag from subject
-    const tagMatch = subject.match(TAG_REGEX);
-    if (!tagMatch) {
-      logger.debug({ subject }, 'Email has no tag in subject, skipping');
-      return;
-    }
+    // Replies from NOTIFICATION_EMAIL always route to admin
+    let tag: string;
+    let isAdmin: boolean;
+    let folder: string;
+    let chatId: string;
 
-    const tag = tagMatch[1].toLowerCase();
-    const isAdmin = tag.toUpperCase() === MAIN_TAG;
-    const folder = isAdmin ? MAIN_GROUP_FOLDER : tag;
-    const chatId = `email:tag:${tag}`;
+    if (isNotificationReply) {
+      tag = MAIN_TAG.toLowerCase();
+      isAdmin = true;
+      folder = MAIN_GROUP_FOLDER;
+      chatId = `email:tag:${tag}`;
+      logger.info({ from, subject }, 'Notification reply routed to admin');
+    } else {
+      // Extract tag from subject for self-to-self emails
+      const tagMatch = subject.match(TAG_REGEX);
+      if (!tagMatch) {
+        logger.debug({ subject }, 'Email has no tag in subject, skipping');
+        return;
+      }
+      tag = tagMatch[1].toLowerCase();
+      isAdmin = tag.toUpperCase() === MAIN_TAG;
+      folder = isAdmin ? MAIN_GROUP_FOLDER : tag;
+      chatId = `email:tag:${tag}`;
+    }
 
     // Extract plain text body, strip signature
     let body = parsed.text || '';

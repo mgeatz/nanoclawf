@@ -144,6 +144,61 @@ server.tool(
 );
 
 server.tool(
+  'get_activity_log',
+  'Get recent activity log entries showing what all agents have been doing. (Main only) Filter by agent or event type to review specific agent performance.',
+  {
+    agent: z.string().optional().describe('Filter by agent group folder (e.g., "content", "research", "social")'),
+    event_type: z.string().optional().describe('Filter by event type (e.g., "agent_completed", "trigger_email_sent", "agent_error")'),
+    limit: z.number().optional().default(50).describe('Max entries to return (default 50)'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Activity log access is restricted to admin.' }] };
+    }
+    const activityFile = path.join(DATA_DIR, 'activity_recent.json');
+    try {
+      if (!fs.existsSync(activityFile)) {
+        return { content: [{ type: 'text' as const, text: 'No activity data available yet.' }] };
+      }
+      let entries = JSON.parse(fs.readFileSync(activityFile, 'utf-8')) as Array<{
+        id: number; timestamp: string; event_type: string; group_folder: string | null;
+        summary: string; details_json: string | null; task_id: string | null;
+      }>;
+      if (args.agent) {
+        entries = entries.filter(e => e.group_folder === args.agent);
+      }
+      if (args.event_type) {
+        entries = entries.filter(e => e.event_type === args.event_type);
+      }
+      entries = entries.slice(0, args.limit || 50);
+      if (entries.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No matching activity entries found.' }] };
+      }
+      const formatted = entries.map(e => {
+        let line = `[${e.timestamp}] ${e.event_type} [${e.group_folder || 'system'}] ${e.summary}`;
+        if (e.details_json) {
+          try {
+            const d = JSON.parse(e.details_json);
+            if (d.textPreview) line += `\n  Preview: ${d.textPreview}`;
+            if (d.bodyPreview) line += `\n  Body: ${d.bodyPreview}`;
+            if (d.subject) line += `\n  Subject: ${d.subject}`;
+            if (d.targetTag) line += `\n  Target: [${d.targetTag}]`;
+            if (d.sourceGroup) line += `\n  Source: [${d.sourceGroup}]`;
+            if (d.error) line += `\n  Error: ${d.error}`;
+          } catch { /* ignore */ }
+        }
+        return line;
+      }).join('\n\n');
+      return { content: [{ type: 'text' as const, text: `Recent activity (${entries.length} entries):\n\n${formatted}` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error reading activity log: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 
@@ -297,7 +352,57 @@ server.tool(
   },
 );
 
-const SUPPORTED_PLATFORMS = ['twitter', 'linkedin', 'reddit'] as const;
+// --- Web Search (Perplexity AI via browser automation) ---
+
+server.tool(
+  'web_search',
+  `Search the web using Perplexity AI. Opens Perplexity in the default browser, waits for the AI-generated answer, and returns the result.
+Use this to research topics, find current information, and answer questions about trends, news, tools, etc.`,
+  {
+    query: z.string().describe('Search query (e.g. "startup funding news 2026", "latest Y Combinator batch startups")'),
+  },
+  async (args) => {
+    try {
+      const encodedQuery = encodeURIComponent(args.query);
+      const searchURL = `https://www.perplexity.ai/search/new?q=${encodedQuery}`;
+      const scriptPath = path.join(SCRIPTS_DIR, 'web-search-perplexity.applescript');
+
+      const result = await new Promise<string>((resolve, reject) => {
+        execFile('osascript', [scriptPath, searchURL], { timeout: 90000 }, (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(stderr || error.message));
+            return;
+          }
+          resolve(stdout.trim());
+        });
+      });
+
+      if (result === 'NO_CONTENT_FOUND' || result === '0' || result === '') {
+        return {
+          content: [{ type: 'text' as const, text: `No results found for: "${args.query}". The page may not have loaded properly. If using Safari, ensure Develop > Allow JavaScript from Apple Events is enabled.` }],
+        };
+      }
+
+      if (result.startsWith('ERROR:')) {
+        return {
+          content: [{ type: 'text' as const, text: result }],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: 'text' as const, text: `Perplexity AI results for "${args.query}":\n\n${result}` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Search error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+const SUPPORTED_PLATFORMS = ['twitter', 'linkedin', 'reddit', 'reddit_dm'] as const;
 
 server.tool(
   'post_to_social',
@@ -306,15 +411,16 @@ server.tool(
 IMPORTANT: Only use this AFTER the user has explicitly approved a draft. Never post without approval.
 
 Requirements:
-- Twitter/X: User must be logged in via their default browser. Requires macOS Accessibility permission.
+- Twitter/X: User must be logged in via their default browser. Requires macOS Accessibility permission. If "url" is provided, replies to that tweet instead of composing a new one.
 - LinkedIn: User must be logged in via Safari. Requires Safari > Develop > Allow JavaScript from Apple Events.
 - Reddit: User must be logged in via their default browser. Requires the "url" parameter with the Reddit post URL.
+- Reddit DM: User must be logged in via their default browser. The "url" parameter should be the target username (without u/).
 
 The tool opens the platform in the browser, pastes the content, and submits the post.`,
   {
-    platform: z.enum(SUPPORTED_PLATFORMS).describe('Target platform: "twitter", "linkedin", or "reddit"'),
+    platform: z.enum(SUPPORTED_PLATFORMS).describe('Target platform: "twitter", "linkedin", "reddit", or "reddit_dm"'),
     text: z.string().describe('The post content text'),
-    url: z.string().optional().describe('Target URL — required for reddit comments (the post URL to comment on)'),
+    url: z.string().optional().describe('Target URL — required for reddit comments (post URL), reddit_dm (target username)'),
   },
   async (args) => {
     if (args.platform === 'reddit' && !args.url) {
@@ -324,7 +430,24 @@ The tool opens the platform in the browser, pastes the content, and submits the 
       };
     }
 
-    const scriptFile = `post-${args.platform}.applescript`;
+    if (args.platform === 'reddit_dm' && !args.url) {
+      return {
+        content: [{ type: 'text' as const, text: 'Reddit DMs require the "url" parameter with the target username.' }],
+        isError: true,
+      };
+    }
+
+    // Determine which AppleScript to run
+    let scriptFile: string;
+    const isTwitterReply = args.platform === 'twitter' && args.url &&
+      /^https?:\/\/(www\.)?(twitter\.com|x\.com)\//i.test(args.url);
+    if (isTwitterReply) {
+      scriptFile = 'post-twitter-reply.applescript';
+    } else if (args.platform === 'reddit_dm') {
+      scriptFile = 'post-reddit-dm.applescript';
+    } else {
+      scriptFile = `post-${args.platform}.applescript`;
+    }
     const scriptPath = path.join(SCRIPTS_DIR, scriptFile);
 
     if (!fs.existsSync(scriptPath)) {
@@ -336,7 +459,10 @@ The tool opens the platform in the browser, pastes the content, and submits the 
 
     try {
       const scriptArgs = [scriptPath, args.text];
-      if (args.url) scriptArgs.push(args.url);
+      // Only pass URL as script arg for reply/reddit scripts, not for twitter compose
+      if (args.url && !(args.platform === 'twitter' && !isTwitterReply)) {
+        scriptArgs.push(args.url);
+      }
 
       const result = await new Promise<string>((resolve, reject) => {
         execFile('osascript', scriptArgs, { timeout: 45000 }, (error, stdout, stderr) => {
@@ -352,6 +478,12 @@ The tool opens the platform in the browser, pastes the content, and submits the 
         return {
           content: [{ type: 'text' as const, text: result }],
           isError: true,
+        };
+      }
+
+      if (result.startsWith('UNVERIFIED:')) {
+        return {
+          content: [{ type: 'text' as const, text: `WARNING: ${result}. Do NOT report this as successfully posted. Ask the user to verify manually.` }],
         };
       }
 

@@ -1,0 +1,1 @@
+osascript -e 'tell application System Events to set target_folder to (POSIX file /Users/nssdemo1/Documents/rd/nano-clawf/nanoclawf/twitter-replies) as alias' -e 'tell application Finder to make new folder at target_folder with name fixed_script'

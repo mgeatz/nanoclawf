@@ -7,6 +7,7 @@ import {
   DATA_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
+  MAIN_TAG,
   MAX_TRIGGERS_PER_HOUR,
   TRIGGER_COOLDOWN_MS,
   TIMEZONE,
@@ -114,17 +115,37 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   const priority = data.priority || 'digest';
 
                   if (priority === 'notify') {
-                    await deps.sendMessage(data.chatId, data.text);
-                    logger.info(
-                      { chatId: data.chatId, sourceGroup, priority },
-                      'IPC message sent (notify)',
-                    );
-                    logActivity({
-                      event_type: 'email_sent',
-                      group_folder: sourceGroup,
-                      summary: `[${sourceGroup}] sent notification email`,
-                      details: { chatId: data.chatId, priority, textPreview: data.text?.slice(0, 200) },
-                    });
+                    if (isMain) {
+                      // Admin sends directly to user
+                      await deps.sendMessage(data.chatId, data.text);
+                      logger.info(
+                        { chatId: data.chatId, sourceGroup, priority },
+                        'IPC message sent to user (admin notify)',
+                      );
+                      logActivity({
+                        event_type: 'email_sent',
+                        group_folder: sourceGroup,
+                        summary: `[${sourceGroup}] sent notification email`,
+                        details: { chatId: data.chatId, priority, textPreview: data.text?.slice(0, 200) },
+                      });
+                    } else {
+                      // Non-admin: route through admin gatekeeper
+                      await deps.sendTriggerEmail(
+                        `[${MAIN_TAG}] Agent Report from [${sourceGroup}]`,
+                        `[${sourceGroup}] sent this with priority "notify":\n\n${data.text}`,
+                        0,
+                      );
+                      logger.info(
+                        { chatId: data.chatId, sourceGroup, priority },
+                        'IPC message routed to admin (non-admin notify)',
+                      );
+                      logActivity({
+                        event_type: 'email_sent',
+                        group_folder: sourceGroup,
+                        summary: `[${sourceGroup}] routed notify to admin`,
+                        details: { chatId: data.chatId, priority, textPreview: data.text?.slice(0, 200) },
+                      });
+                    }
                   } else if (priority === 'digest') {
                     deps.queueDigest(data.chatId, sourceGroup, data.text);
                     logger.info(
@@ -388,18 +409,16 @@ export async function processTaskIpc(
       if (data.tag && data.subject && data.body) {
         const targetTag = data.tag.toLowerCase();
 
-        // Authorization: non-main can only trigger their own tag
-        if (!isMain) {
-          const sourceTag = Object.values(registeredGroups).find(
-            (g) => g.folder === sourceGroup,
-          )?.tag;
-          if (sourceTag !== targetTag) {
-            logger.warn(
-              { sourceGroup, targetTag },
-              'Unauthorized trigger_email attempt blocked',
-            );
-            break;
-          }
+        // Validate target tag exists as a registered group
+        const targetExists = Object.values(registeredGroups).some(
+          (g) => g.tag === targetTag,
+        );
+        if (!targetExists) {
+          logger.warn(
+            { sourceGroup, targetTag },
+            'trigger_email target tag not found',
+          );
+          break;
         }
 
         // Rate limiting

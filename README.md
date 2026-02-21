@@ -73,7 +73,7 @@ NanoClaw runs a team of specialized AI agents that collaborate autonomously:
 
 | Agent | Tag | Role |
 |-------|-----|------|
-| **Admin** | `[ADMIN]` | Overseer — delegates work, approves content, elevated privileges |
+| **Admin** | `[ADMIN]` | **Gatekeeper** — all agent-to-user comms flow through admin, routes replies back to agents |
 | **Nova** | `[research]` | Startup ecosystem intelligence — trends, competitors, tools |
 | **Ledger** | `[growth]` | Growth metrics — funding landscape, angel investment trends |
 | **Echo** | `[content]` | Brand & marketing — drafts and posts social content, blog outlines, newsletters |
@@ -82,27 +82,57 @@ NanoClaw runs a team of specialized AI agents that collaborate autonomously:
 | **Harbor** | `[community]` | Founder relations — Discord engagement, onboarding, spotlights |
 | **SocialSpark** | `[social]` | Social media SEO — viral strategies, platform trends, Reddit engagement |
 
-Agents communicate via **trigger emails** — cross-group messages that route work to the right specialist. For example, Nova discovers a trending topic and triggers Echo to draft content about it. Trigger depth is tracked to prevent infinite loops (max 3 hops).
+**Admin is the gatekeeper.** All agent-to-user communications flow through the admin agent. When agents have something important (approvals, alerts, findings), they send it to admin, who decides what to forward to the user. When the user replies from `NOTIFICATION_EMAIL`, it goes to admin, who routes it to the right agent.
+
+```
+Agents → [admin] → user (NOTIFICATION_EMAIL)
+User → replies to [admin] → routes to agents via trigger_email
+```
+
+Agents also communicate directly via **trigger emails** — cross-group messages that route work to the right specialist. For example, Nova discovers a trending topic and triggers Echo to draft content about it. Trigger depth is tracked to prevent infinite loops (max 3 hops).
 
 ### Social Media Posting
 
 Echo can publish approved content directly to social platforms using macOS AppleScript automation:
 
 1. Echo drafts content and saves it to `groups/content/drafts/`
-2. Echo notifies you with the draft for review
-3. You reply with `[content] approve draft-{id}` to approve
+2. Echo notifies admin, who forwards to you for review
+3. You reply to approve — admin routes approval to Echo
 4. Echo uses `post_to_social` to publish via your browser (Twitter/X, LinkedIn)
+
+### Twitter/X Reply Engagement
+
+Echo searches for tweets from founders asking about startup challenges every 2 hours. When it finds a good opportunity:
+
+1. Echo drafts a helpful reply that naturally mentions the Launch80 Discord
+2. Sends the draft to admin with the original tweet context
+3. Admin forwards for your review — you reply with approval
+4. Echo uses `post_to_social` with the tweet URL to reply via your browser
+
+Rate limited to 3 replies per day. All Discord links use UTM tracking (`?utm_source=twitter_reply`).
 
 ### Reddit Engagement
 
 SocialSpark scans startup subreddits (r/startups, r/Entrepreneur, r/SideProject, etc.) every 2 hours looking for posts where Launch80 can add value. When it finds a good opportunity:
 
 1. SocialSpark drafts a helpful comment that naturally mentions the Launch80 Discord
-2. Sends you the draft with context for review
-3. You reply with `[social] approve comment-{id}` to approve
+2. Sends the draft to admin with post context for review
+3. You reply to approve — admin routes to SocialSpark
 4. SocialSpark uses `post_to_social` with the Reddit post URL to comment via your browser
 
-Rate limited to 3 comments per day to avoid spam. Comments lead with genuine value — not promotion.
+Rate limited to 3 comments per day. Comments lead with genuine value — not promotion. Discord links use UTM tracking (`?utm_source=reddit`).
+
+### Content Repurposing
+
+Echo automatically repurposes high-performing content daily at 11am:
+- Reddit comments → tweets + LinkedIn posts
+- Tweets → LinkedIn posts
+
+Each repurposed piece includes platform-appropriate UTM-tracked Discord links.
+
+### Reddit Performance Tracking
+
+SocialSpark tracks engagement on posted Reddit comments every 6 hours. When a comment performs well (high upvotes, generates replies), it flags it to admin and triggers Echo to repurpose the winning content.
 
 ### Browser Automation Requirements
 
@@ -117,11 +147,11 @@ Each agent has autonomous tasks that run on cron schedules or intervals:
 
 - **Nova:** Daily trend scan (8:30 AM), weekly deep dive (Friday 2 PM)
 - **Ledger:** Funding scan (every 6h), weekly growth report (Monday 9 AM)
-- **Echo:** Daily content review (10 AM)
+- **Echo:** Content review (every 45min), Twitter reply engagement (every 2h), content repurposing (daily 11 AM)
 - **Sentinel:** Daily digest (8 AM), health check (every 4h)
 - **Atlas:** Daily standup (9 AM), weekly product review (Friday 5 PM)
 - **Harbor:** Daily community pulse (9:30 AM), weekly founder spotlight (Wednesday 3 PM)
-- **SocialSpark:** Daily trend & strategy scan, weekly growth strategy report, Reddit engagement (every 2h)
+- **SocialSpark:** Daily trend & strategy scan, weekly growth strategy report, Reddit engagement (every 2h), Reddit performance tracking (every 6h)
 
 ### Notification Priority System
 
@@ -129,7 +159,7 @@ Not all agent output needs your immediate attention. The `send_message` tool has
 
 | Priority | Behavior | Example |
 |----------|----------|---------|
-| `notify` | Immediate email | Approvals needed, alerts, direct answers |
+| `notify` | Routed to admin, then forwarded to user | Approvals needed, alerts, direct answers |
 | `digest` | Batched into periodic digest email (default) | Status updates, routine reports |
 | `log` | Activity log only, no email | "Nothing new" check-ins, internal notes |
 

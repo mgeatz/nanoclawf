@@ -74,6 +74,11 @@ export async function runOpenCodeAgent(opts: AgentInput): Promise<AgentOutput> {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    // Emit PID event so the tracker can monitor process stats
+    if (opts.onEvent && proc.pid) {
+      opts.onEvent({ type: 'pid', text: String(proc.pid) });
+    }
+
     let stdout = '';
     let stderr = '';
     let stdoutBuffer = '';

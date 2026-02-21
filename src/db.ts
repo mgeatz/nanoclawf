@@ -532,6 +532,10 @@ export function setRegisteredGroup(
   );
 }
 
+export function deleteRegisteredGroup(chatId: string): void {
+  db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(chatId);
+}
+
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
   const rows = db
     .prepare('SELECT * FROM registered_groups')
@@ -609,19 +613,28 @@ export function getActivityLog(
   limit = 50,
   offset = 0,
   eventType?: string,
+  since?: string,
 ): ActivityLogEntry[] {
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
   if (eventType) {
-    return db
-      .prepare(
-        `SELECT * FROM activity_log WHERE event_type = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
-      )
-      .all(eventType, limit, offset) as ActivityLogEntry[];
+    conditions.push('event_type = ?');
+    params.push(eventType);
   }
+  if (since) {
+    conditions.push('timestamp > ?');
+    params.push(since);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  params.push(limit, offset);
+
   return db
     .prepare(
-      `SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
+      `SELECT * FROM activity_log ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
     )
-    .all(limit, offset) as ActivityLogEntry[];
+    .all(...params) as ActivityLogEntry[];
 }
 
 export function getTaskRunStats(
@@ -643,6 +656,107 @@ export function getTaskRunStats(
     avg_duration_ms: number;
   };
   return row;
+}
+
+// --- Collaboration metrics ---
+
+export interface CollaborationPair {
+  source: string;
+  target: string;
+  count: number;
+}
+
+export interface CollaborationMetrics {
+  totalTriggers: number;
+  uniquePairs: number;
+  byAgent: Record<string, { sent: number; received: number }>;
+  pairs: CollaborationPair[];
+}
+
+export function getCollaborationMetrics(hours = 24): CollaborationMetrics {
+  const cutoff = new Date(Date.now() - hours * 3_600_000).toISOString();
+
+  const rows = db
+    .prepare(
+      `SELECT
+        json_extract(details_json, '$.sourceGroup') as source,
+        json_extract(details_json, '$.targetTag') as target,
+        COUNT(*) as count
+      FROM activity_log
+      WHERE event_type = 'trigger_email_sent' AND timestamp > ?
+        AND json_extract(details_json, '$.sourceGroup') IS NOT NULL
+        AND json_extract(details_json, '$.targetTag') IS NOT NULL
+      GROUP BY source, target
+      ORDER BY count DESC`,
+    )
+    .all(cutoff) as Array<{ source: string; target: string; count: number }>;
+
+  const byAgent: Record<string, { sent: number; received: number }> = {};
+  let totalTriggers = 0;
+
+  for (const row of rows) {
+    totalTriggers += row.count;
+
+    if (!byAgent[row.source]) byAgent[row.source] = { sent: 0, received: 0 };
+    byAgent[row.source].sent += row.count;
+
+    if (!byAgent[row.target]) byAgent[row.target] = { sent: 0, received: 0 };
+    byAgent[row.target].received += row.count;
+  }
+
+  return {
+    totalTriggers,
+    uniquePairs: rows.length,
+    byAgent,
+    pairs: rows.map((r) => ({ source: r.source, target: r.target, count: r.count })),
+  };
+}
+
+export function getCollaborationTrend(): { current: number; previous: number } {
+  const now = Date.now();
+  const cutoff24h = new Date(now - 24 * 3_600_000).toISOString();
+  const cutoff48h = new Date(now - 48 * 3_600_000).toISOString();
+
+  const current = (
+    db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM activity_log
+         WHERE event_type = 'trigger_email_sent' AND timestamp > ?`,
+      )
+      .get(cutoff24h) as { cnt: number }
+  ).cnt;
+
+  const previous = (
+    db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM activity_log
+         WHERE event_type = 'trigger_email_sent' AND timestamp > ? AND timestamp <= ?`,
+      )
+      .get(cutoff48h, cutoff24h) as { cnt: number }
+  ).cnt;
+
+  return { current, previous };
+}
+
+export function computeCollaborationScore(metrics: CollaborationMetrics): number {
+  const MAX_PAIRS = 42; // 7 non-admin agents, 42 possible directed pairs
+  const MAX_AGENTS = 7;
+  const VOLUME_TARGET = 20;
+
+  const diversity = (metrics.uniquePairs / MAX_PAIRS) * 40;
+  const volume = Math.min(metrics.totalTriggers / VOLUME_TARGET, 1) * 30;
+  const agentsWhoTriggered = Object.values(metrics.byAgent).filter((a) => a.sent > 0).length;
+  const participation = (agentsWhoTriggered / MAX_AGENTS) * 30;
+
+  return Math.round(diversity + volume + participation);
+}
+
+export function getAdminActivity(limit = 30): ActivityLogEntry[] {
+  return db
+    .prepare(
+      `SELECT * FROM activity_log WHERE group_folder = 'main' ORDER BY timestamp DESC LIMIT ?`,
+    )
+    .all(limit) as ActivityLogEntry[];
 }
 
 export function pruneActivityLog(keepDays = 7): void {

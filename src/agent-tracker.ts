@@ -17,6 +17,7 @@ export interface ActiveAgent {
   taskId?: string;
   prompt: string;
   model?: string;
+  pid: number | null;
   events: AgentEvent[];
   tokenCount: number;
   firstTokenAt: number | null;
@@ -29,15 +30,21 @@ const MAX_EVENTS = 200;
 
 export function registerAgent(
   groupFolder: string,
-  info: Omit<ActiveAgent, 'events' | 'tokenCount' | 'firstTokenAt' | 'lastTokenAt'>,
+  info: Omit<ActiveAgent, 'events' | 'tokenCount' | 'firstTokenAt' | 'lastTokenAt' | 'pid'>,
 ): void {
   agents[groupFolder] = {
     ...info,
+    pid: null,
     events: [],
     tokenCount: 0,
     firstTokenAt: null,
     lastTokenAt: null,
   };
+}
+
+export function setAgentPid(groupFolder: string, pid: number): void {
+  const agent = agents[groupFolder];
+  if (agent) agent.pid = pid;
 }
 
 export function unregisterAgent(groupFolder: string): void {
